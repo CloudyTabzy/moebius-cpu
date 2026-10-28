@@ -7,10 +7,10 @@
 //! See `docs/PLAN.md` for the design, the measured compute budget and the
 //! speed promise.
 //!
-//! Status: `engine` (all compute kernels), `scheduler`, `weights`,
-//! `imaging::crop` and the C ABI are implemented and tested; the model
-//! assembly (`unet`, `vae`, `pipeline`) is stubbed with the milestone that
-//! delivers each part.
+//! Status: the compute kernels, `unet`, `vae`, `scheduler`, `imaging`,
+//! the end-to-end `pipeline` (Exact preset, verified against PyTorch with
+//! `examples/parity.rs`) and the C ABI are implemented. Fast-preset ROI
+//! decode and paste compensation are still M8.
 
 pub mod config;
 pub mod engine;

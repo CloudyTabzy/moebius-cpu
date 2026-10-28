@@ -523,3 +523,79 @@ fn vae_timing() {
     let (d, runs) = median(&mut || drop(vae.decode(&z, &mut s)));
     println!("vae decode b=1 f16: median {d:.2} s (runs {runs:.2?})");
 }
+
+// ---------------------------------------------------------------------------
+// End to end (Task 7)
+
+use moebius_cpu::Error;
+use moebius_cpu::imaging::{ImageMut, MaskRef};
+use moebius_cpu::pipeline::{Control, Engine, NoiseSet, Stage};
+use moebius_cpu::preset::Preset;
+
+fn golden_noise(g: &Weights) -> NoiseSet {
+    NoiseSet {
+        vae_img: tensor(g, "noise.vae_img"),
+        vae_masked: tensor(g, "noise.vae_masked"),
+        init: tensor(g, "noise.init"),
+        offset: tensor(g, "noise.offset"),
+    }
+}
+
+fn golden_u8(g: &Weights, name: &str, c: usize) -> Vec<u8> {
+    g.get_f32(name, &[1, 512, 512, c]).unwrap().iter().map(|&v| v.round() as u8).collect()
+}
+
+/// Full inpaint of golden `case` with its recorded noise: (PSNR dB, rel_l2(latents.final)).
+fn e2e(case: usize, dtype: &str) -> (f64, f64) {
+    let dir = if dtype == "f32" { "weights/ft_places2-f32" } else { "weights/ft_places2" };
+    let engine = Engine::load(&root().join(dir), 0).unwrap();
+    let g = golden(case);
+    let (mut data, mask, want) = (golden_u8(&g, "input.image", 3), golden_u8(&g, "input.mask", 1), golden_u8(&g, "output.image", 3));
+    let mut img = ImageMut { data: &mut data, width: 512, height: 512, stride: 512 * 3, channels: 3 };
+    let m = MaskRef { data: &mask, width: 512, height: 512, stride: 512 };
+    let mut latents = Vec::new();
+    let t = Instant::now();
+    engine
+        .inpaint_traced(&mut img, m, &Preset::Exact.params(), &golden_noise(&g), &mut |_| Control::Continue, Some(&mut latents))
+        .unwrap();
+    let mse = data.iter().zip(&want).map(|(&a, &b)| (a as f64 - b as f64).powi(2)).sum::<f64>() / data.len() as f64;
+    let psnr = 10.0 * (255.0f64 * 255.0 / mse.max(1e-12)).log10();
+    let lat = rel_l2(&latents, tensor(&g, "latents.final").data.as_slice());
+    println!("e2e case {case} {dtype}: PSNR {psnr:.2} dB, latents rel_l2 {lat:.3e}, {:.1} s", t.elapsed().as_secs_f64());
+    (psnr, lat)
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/ (~40 s)"]
+fn e2e_matches_pytorch_case0_f32() {
+    let (psnr, _) = e2e(0, "f32");
+    assert!(psnr >= 45.0, "PSNR {psnr:.2} dB < 45 dB");
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/ (~40 s)"]
+fn e2e_matches_pytorch_case0_f16() {
+    let (psnr, _) = e2e(0, "f16");
+    assert!(psnr >= 30.0, "PSNR {psnr:.2} dB < 30 dB");
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn cancel_leaves_image_untouched_and_progress_is_reported() {
+    let engine = Engine::load(&root().join("weights/ft_places2"), 0).unwrap();
+    let g = golden(0);
+    let (mut data, mask) = (golden_u8(&g, "input.image", 3), golden_u8(&g, "input.mask", 1));
+    let before = data.clone();
+    let mut img = ImageMut { data: &mut data, width: 512, height: 512, stride: 512 * 3, channels: 3 };
+    let m = MaskRef { data: &mask, width: 512, height: 512, stride: 512 };
+    let mut seen = Vec::new();
+    let r = engine.inpaint_with_noise(&mut img, m, &Preset::Exact.params(), &golden_noise(&g), &mut |p| {
+        seen.push((p.stage, p.done, p.total));
+        if p.stage == Stage::Denoise && p.done == 2 { Control::Cancel } else { Control::Continue }
+    });
+    assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+    assert_eq!(data, before, "cancelled run must not touch the image");
+    let denoise: Vec<_> = seen.iter().filter(|s| s.0 == Stage::Denoise).collect();
+    assert_eq!(denoise.len(), 2, "{seen:?}");
+    assert_eq!((denoise[1].1, denoise[1].2), (2, 19));
+}
