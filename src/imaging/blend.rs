@@ -3,9 +3,12 @@
 //! * `Feather`: `out = result·m + src·(1 − m)` with `m` the binary mask
 //!   blurred with PIL `GaussianBlur(radius=3)` (reproduced byte-exactly by
 //!   [`pil_gaussian_blur`]), arithmetic in f64 and truncated like numpy.
-//! * `FeatherCompensate`: upstream additionally shifts the result by 1.1 × the
-//!   mean colour difference in a 10 px ring around the mask. Not ported yet
-//!   (M8); it currently behaves like `Feather`.
+//! * `FeatherCompensate`: upstream `compensation_utils.paste_compensate(.., fac=1.1)`
+//!   additionally shifts the result by 1.1 × the per-channel difference of the
+//!   mean colour (source − result) over a ring around the mask: the mask bbox
+//!   grown by 10 px (centred, clipped to the window) minus the mask. The mask
+//!   is thresholded at `> 128` there (Feather: `>= 128`). With no ring pixels
+//!   (upstream: 0/0 = NaN) it falls back to `Feather`.
 //!
 //! Only pixels inside `CropPlan::source_rect` are written.
 
@@ -100,6 +103,53 @@ pub fn pil_gaussian_blur(mask: &[u8], w: usize, h: usize, radius: f32) -> Vec<u8
 /// whole-image blur there (3 passes of radius ≈ 2.4 per axis reach ≈ 7 px).
 const BLUR_MARGIN: usize = 16;
 
+/// Upstream `paste_compensate(.., fac=1.1)` strength.
+const COMPENSATE_FAC: f64 = 1.1;
+/// Upstream `get_bbox_unmask(off=10)`: total growth of the mask bbox.
+const RING_OFF: usize = 10;
+
+/// Per-channel `mean(src over ring) − mean(result over ring)` of upstream
+/// `get_unmasked_stat` / `get_bbox_unmask`, on the source-rect window.
+/// `set(x, y)` is the binary mask in window coordinates, `src_px` / `res_px` the
+/// window's pixels. `None` when the mask is empty or the ring has no pixels.
+fn ring_delta<'a, 'b>(
+    w: usize,
+    h: usize,
+    set: impl Fn(usize, usize) -> bool,
+    src_px: impl Fn(usize, usize) -> &'a [u8],
+    res_px: impl Fn(usize, usize) -> &'b [u8],
+) -> Option<[f64; 3]> {
+    let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0, usize::MAX, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if set(x, y) {
+                (r0, r1, c0, c1) = (r0.min(y), r1.max(y), c0.min(x), c1.max(x));
+            }
+        }
+    }
+    if r0 == usize::MAX {
+        return None;
+    }
+    // New size = old + off; centre = (min + max) // 2; half = new // 2 (numpy int arithmetic).
+    let (hh, hw) = ((r1 - r0 + 1 + RING_OFF) / 2, (c1 - c0 + 1 + RING_OFF) / 2);
+    let (cr, cc) = ((r0 + r1) / 2, (c0 + c1) / 2);
+    let (y0, y1) = (cr.saturating_sub(hh), (cr + hh).min(h - 1));
+    let (x0, x1) = (cc.saturating_sub(hw), (cc + hw).min(w - 1));
+    let (mut sum_src, mut sum_res, mut n) = ([0u64; 3], [0u64; 3], 0u64);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if !set(x, y) {
+                n += 1;
+                for c in 0..3 {
+                    sum_src[c] += src_px(x, y)[c] as u64;
+                    sum_res[c] += res_px(x, y)[c] as u64;
+                }
+            }
+        }
+    }
+    (n > 0).then(|| std::array::from_fn(|c| sum_src[c] as f64 / n as f64 - sum_res[c] as f64 / n as f64))
+}
+
 /// `result`: the window resized back, `side × side` RGB 8-bit (`CropPlan::side`).
 /// Returns the rectangle of `img` that was written.
 pub fn paste(img: &mut ImageMut<'_>, mask: MaskRef<'_>, result: &[u8], plan: &CropPlan, mode: Paste) -> Rect {
@@ -121,8 +171,10 @@ pub fn paste(img: &mut ImageMut<'_>, mask: MaskRef<'_>, result: &[u8], plan: &Cr
                 }
             }
         }
-        // FeatherCompensate: M8 (mean-colour compensation); feathers for now.
         Paste::Feather | Paste::FeatherCompensate => {
+            let compensate = mode == Paste::FeatherCompensate;
+            // numpy: Feather binarises at `>= 128`, upstream's compensation at `> 128`.
+            let lo = if compensate { 129 } else { 128 };
             // Blur the binary mask on the rectangle plus a margin; the margin
             // keeps the image-edge clamp of PIL where the real image ends.
             let rx0 = src.x.saturating_sub(BLUR_MARGIN);
@@ -133,18 +185,31 @@ pub fn paste(img: &mut ImageMut<'_>, mask: MaskRef<'_>, result: &[u8], plan: &Cr
             let mut region = Vec::with_capacity(rw * rh);
             for y in ry0..ry1 {
                 let row = &mask.data[y * mask.stride + rx0..y * mask.stride + rx1];
-                region.extend(row.iter().map(|&v| if v >= 128 { 255u8 } else { 0 }));
+                region.extend(row.iter().map(|&v| if v >= lo { 255u8 } else { 0 }));
             }
             let blurred = pil_gaussian_blur(&region, rw, rh, 3.0);
+            // Per-channel shift `fac · delta / 255`; `None` = plain Feather.
+            let shift = compensate
+                .then(|| {
+                    let set = |x: usize, y: usize| region[(src.y + y - ry0) * rw + src.x + x - rx0] != 0;
+                    let src_px = |x: usize, y: usize| &img.data[(src.y + y) * img.stride + (src.x + x) * ch..][..3];
+                    ring_delta(src.w, src.h, set, src_px, result_px)
+                })
+                .flatten()
+                .map(|d| d.map(|d| COMPENSATE_FAC * d / 255.0));
             for y in 0..src.h {
                 for x in 0..src.w {
-                    // numpy: m = blur/255; (res/255)·m + (1−m)·(src/255), then ·255 → uint8.
+                    // numpy: m = blur/255; (res/255 [+ shift])·m + (1−m)·(src/255), clip, ·255 → uint8.
                     let m = blurred[(src.y + y - ry0) * rw + src.x + x - rx0] as f64 / 255.0;
                     let r = result_px(x, y);
                     let o = (src.y + y) * img.stride + (src.x + x) * ch;
-                    for (dst, &res) in img.data[o..o + 3].iter_mut().zip(r) {
-                        let (res, orig) = (res as f64 / 255.0, *dst as f64 / 255.0);
-                        *dst = ((res * m + (1.0 - m) * orig) * 255.0) as u8;
+                    for (c, (dst, &res)) in img.data[o..o + 3].iter_mut().zip(r).enumerate() {
+                        let (mut res, orig) = (res as f64 / 255.0, *dst as f64 / 255.0);
+                        if let Some(shift) = shift {
+                            res += shift[c];
+                        }
+                        let out = res * m + (1.0 - m) * orig;
+                        *dst = (if shift.is_some() { out.clamp(0.0, 1.0) } else { out } * 255.0) as u8;
                     }
                 }
             }
@@ -209,5 +274,68 @@ mod tests {
         assert_eq!(px(20, 15), 250, "deep inside the mask the result wins");
         let edge = px(9, 15);
         assert!(edge > 10 && edge < 250, "feathered edge: {edge}");
+    }
+
+    fn compensate_fixture() -> Weights {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compensate.safetensors");
+        Weights::open_with_format(&path, "moebius-cpu-fixture/1").expect("run tools/dump_compensate_fixture.py")
+    }
+
+    /// Pastes `result` (w × h RGB) over `image` through a window at the origin that is
+    /// as large as the image's long side (`result` is padded to side × side).
+    fn paste_at_origin(image: &[u8], result: &[u8], mask: &[u8], w: usize, h: usize, mode: Paste) -> Vec<u8> {
+        let side = w.max(h);
+        let mut padded = vec![0u8; side * side * 3];
+        for y in 0..h {
+            padded[y * side * 3..(y * side + w) * 3].copy_from_slice(&result[y * w * 3..(y + 1) * w * 3]);
+        }
+        let mut data = image.to_vec();
+        let plan = CropPlan { x: 0, y: 0, side };
+        let mut img = ImageMut { data: &mut data, width: w, height: h, stride: w * 3, channels: 3 };
+        paste(&mut img, MaskRef { data: mask, width: w, height: h, stride: w }, &padded, &plan, mode);
+        data
+    }
+
+    /// Upstream `paste_compensate(.., fac=1.1)` (`tools/dump_compensate_fixture.py`), byte-exact.
+    #[test]
+    fn compensated_paste_is_byte_exact_vs_upstream() {
+        let f = compensate_fixture();
+        for (k, (w, h)) in [("a", (96, 80)), ("b", (48, 40)), ("c", (48, 40))] {
+            let bytes = |name: &str, shape: &[usize]| -> Vec<u8> {
+                f.get_f32(&format!("{k}.{name}"), shape).unwrap().iter().map(|&v| v as u8).collect()
+            };
+            let (image, result) = (bytes("image", &[h, w, 3]), bytes("result", &[h, w, 3]));
+            let (mask, want) = (bytes("mask", &[h, w]), bytes("out", &[h, w, 3]));
+            let got = paste_at_origin(&image, &result, &mask, w, h, Paste::FeatherCompensate);
+            let bad = got.iter().zip(&want).filter(|(g, w)| g != w).count();
+            let max = got.iter().zip(&want).map(|(&g, &w)| g.abs_diff(w)).max().unwrap();
+            assert_eq!(bad, 0, "case {k}: {bad} of {} bytes differ from upstream (max diff {max})", want.len());
+            let plain = paste_at_origin(&image, &result, &mask, w, h, Paste::Feather);
+            assert_ne!(plain, got, "case {k}: compensation must change the output");
+        }
+    }
+
+    /// A mask covering the whole image leaves no neighbour ring: upstream divides 0/0;
+    /// we fall back to plain Feather.
+    #[test]
+    fn compensation_with_empty_ring_falls_back_to_feather() {
+        let (w, h) = (24, 20);
+        let image: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let result: Vec<u8> = (0..w * h * 3).map(|i| (i * 13 % 241) as u8).collect();
+        let mask = vec![255u8; w * h];
+        let feather = paste_at_origin(&image, &result, &mask, w, h, Paste::Feather);
+        let comp = paste_at_origin(&image, &result, &mask, w, h, Paste::FeatherCompensate);
+        assert_eq!(comp, feather);
+    }
+
+    /// An empty mask inside the window has no bbox to grow: also plain Feather.
+    #[test]
+    fn compensation_with_empty_mask_falls_back_to_feather() {
+        let (w, h) = (16, 16);
+        let image = vec![90u8; w * h * 3];
+        let result = vec![200u8; w * h * 3];
+        let mask = vec![0u8; w * h];
+        let feather = paste_at_origin(&image, &result, &mask, w, h, Paste::Feather);
+        assert_eq!(paste_at_origin(&image, &result, &mask, w, h, Paste::FeatherCompensate), feather);
     }
 }

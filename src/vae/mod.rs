@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use self::decoder::Decoder;
 use self::encoder::Encoder;
-use crate::config::{VAE_EPS, VAE_SCALING_FACTOR};
+use crate::config::{LATENT_SIZE, VAE_EPS, VAE_SCALING_FACTOR};
 use crate::engine::conv::{Conv1x1, Conv3x3};
 use crate::engine::gemm::{MatRef, matmul};
 use crate::engine::math::exp;
@@ -50,6 +50,31 @@ pub struct LatentRect {
     pub y: usize,
     pub w: usize,
     pub h: usize,
+}
+
+/// Latents of context added on every side of the mask bbox for ROI decoding. The
+/// decoder's receptive field is ~4 latents (a few 3x3 convs per level, damped by the
+/// upsampling), the paste feather reaches 7 px (< 1 latent), and the 8 px mask sampling
+/// grid of `mask_lat` can miss up to one latent cell of mask: 8 covers all of it with
+/// room for the window-local mid attention and GroupNorm statistics.
+pub const ROI_MARGIN: usize = 8;
+
+/// Bounding box of the nonzero entries of `mask_lat` (`64 x 64`, row-major, 0/1), grown by
+/// `margin` latents on every side and clamped to the latent grid. `None` for an empty mask.
+pub fn roi_window(mask_lat: &[f32], margin: usize) -> Option<LatentRect> {
+    const N: usize = LATENT_SIZE;
+    assert_eq!(mask_lat.len(), N * N, "latent mask must be {N} x {N}");
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, _) in mask_lat.iter().enumerate().filter(|(_, v)| **v > 0.5) {
+        let (y, x) = (i / N, i % N);
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    if x0 == usize::MAX {
+        return None;
+    }
+    let (x0, y0) = (x0.saturating_sub(margin), y0.saturating_sub(margin));
+    let (x1, y1) = ((x1 + margin).min(N - 1), (y1 + margin).min(N - 1));
+    Some(LatentRect { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 })
 }
 
 /// `AutoencoderKL`: encoder + decoder with the SDXL-VAE weights.
@@ -81,6 +106,16 @@ impl Vae {
     /// unclamped, `[1, 512, 512, 3]`.
     pub fn decode(&self, latents: &Tensor, s: &mut Scratch) -> Tensor {
         self.decoder.decode(latents, s)
+    }
+
+    /// Decodes only `latents[roi]` (`latents`: scaled `[1, 64, 64, 4]`; `roi` inside the
+    /// grid): `[1, 8·roi.h, 8·roi.w, 3]`, `(x + 1) / 2`, unclamped. The decoder is fully
+    /// convolutional, so this is `decode` of the cropped latent: pixels away from the
+    /// window border match the full decode closely, but the mid-block attention and the
+    /// GroupNorm statistics see the window only, and the border sees zero padding. A
+    /// window covering the whole latent is exactly `decode`.
+    pub fn decode_roi(&self, latents: &Tensor, roi: LatentRect, s: &mut Scratch) -> Tensor {
+        self.decoder.decode_roi(latents, roi, s)
     }
 }
 
@@ -272,5 +307,45 @@ impl MidBlock {
             attn: MidAttention::load(&l.sub("attentions.0"), c)?,
             resnet1: Resnet::load(&l.sub("resnets.1"), c, c)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lat(cells: &[(usize, usize)]) -> Vec<f32> {
+        let mut m = vec![0.0; 64 * 64];
+        for &(x, y) in cells {
+            m[y * 64 + x] = 1.0;
+        }
+        m
+    }
+
+    #[test]
+    fn roi_window_of_an_empty_mask_is_none() {
+        assert_eq!(roi_window(&lat(&[]), ROI_MARGIN), None);
+    }
+
+    #[test]
+    fn roi_window_of_everything_is_the_full_latent() {
+        let full = LatentRect { x: 0, y: 0, w: 64, h: 64 };
+        assert_eq!(roi_window(&vec![1.0; 64 * 64], ROI_MARGIN), Some(full));
+        assert_eq!(roi_window(&lat(&[(0, 0), (63, 63)]), ROI_MARGIN), Some(full));
+    }
+
+    #[test]
+    fn roi_window_grows_by_the_margin_and_clamps_at_the_border() {
+        // Interior: bbox x 20..=24, y 30..=31, grown by 8.
+        assert_eq!(
+            roi_window(&lat(&[(20, 30), (24, 31)]), 8),
+            Some(LatentRect { x: 12, y: 22, w: 5 + 16, h: 2 + 16 })
+        );
+        // Top-left corner: the window starts at 0 and only grows right/down.
+        assert_eq!(roi_window(&lat(&[(0, 0), (2, 1)]), 8), Some(LatentRect { x: 0, y: 0, w: 3 + 8, h: 2 + 8 }));
+        // Bottom-right corner: ends at 63.
+        assert_eq!(roi_window(&lat(&[(62, 63)]), 8), Some(LatentRect { x: 54, y: 55, w: 10, h: 9 }));
+        // Zero margin is the bare bbox.
+        assert_eq!(roi_window(&lat(&[(5, 6)]), 0), Some(LatentRect { x: 5, y: 6, w: 1, h: 1 }));
     }
 }

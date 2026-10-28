@@ -15,6 +15,7 @@
 //!        x = DDIM.step(ε, t, x)
 //!        progress(); bail out if cancelled
 //!  9  rgb = VAE.decode(x / 0.13025)  (Fast: ROI window)     vae::decoder
+//!       ROI: decode latents[bbox(mask_lat) ± 8], rest = input image
 //! 10  resize back to window, paste with feathered mask      imaging::blend
 //! ```
 //! Everything runs inside the engine's own rayon pool, sized to physical
@@ -35,7 +36,7 @@ use crate::imaging::{ImageMut, MaskRef, Rect, dilate};
 use crate::preset::InpaintParams;
 use crate::scheduler::Ddim;
 use crate::unet::{Guidance, UNet};
-use crate::vae::Vae;
+use crate::vae::{LatentRect, ROI_MARGIN, Vae, roi_window};
 use crate::weights::Weights;
 use crate::{Error, Result};
 
@@ -246,7 +247,7 @@ impl Engine {
             scratch.recycle(z);
             (v.clone(), v)
         } else {
-            let images = Tensor::from_vec([rgb, masked].concat(), 2, IMAGE_SIZE, IMAGE_SIZE, 3);
+            let images = Tensor::from_vec([rgb.as_slice(), masked.as_slice()].concat(), 2, IMAGE_SIZE, IMAGE_SIZE, 3);
             let noises = Tensor::from_vec(
                 [noise.vae_img.data.as_slice(), noise.vae_masked.data.as_slice()].concat(),
                 2,
@@ -318,10 +319,23 @@ impl Engine {
             out.clone_from(&x);
         }
 
-        // 9: decode (M8: params.roi_decode decodes only a window around the mask).
+        // 9: decode. ROI: only a window around the mask (its latent bbox ± ROI_MARGIN);
+        // the rest of the 512² frame is the model-input image, which the paste never
+        // reads (outside mask + feather the source wins) but which keeps every blend
+        // input defined. An empty latent mask (tiny mask between sample points) or a
+        // window covering the whole latent decodes in full.
         report(Stage::Decode, 0, 1)?;
         let latents = Tensor::from_vec(x, 1, LATENT_SIZE, LATENT_SIZE, LATENT_CHANNELS);
-        let decoded = self.pool.install(|| self.vae.decode(&latents, &mut scratch));
+        let roi = if params.roi_decode { roi_window(&mask_lat, ROI_MARGIN) } else { None };
+        let decoded = self.pool.install(|| match roi {
+            Some(r) if r.w < LATENT_SIZE || r.h < LATENT_SIZE => {
+                let part = self.vae.decode_roi(&latents, r, &mut scratch);
+                let frame = roi_frame(&rgb, r, &part.data);
+                scratch.recycle(part);
+                Tensor::from_vec(frame, 1, IMAGE_SIZE, IMAGE_SIZE, 3)
+            }
+            _ => self.vae.decode(&latents, &mut scratch),
+        });
         report(Stage::Decode, 1, 1)?;
 
         // 10 (first half): 8-bit truncation, resized back to the window.
@@ -331,9 +345,46 @@ impl Engine {
     }
 }
 
+/// 512² model-space frame `(x + 1) / 2` of the input image `rgb` (NHWC, [-1, 1]) with the
+/// decoded ROI `part` (`[8·roi.h, 8·roi.w, 3]`, already `(x + 1) / 2`) placed at `roi`.
+fn roi_frame(rgb: &[f32], roi: LatentRect, part: &[f32]) -> Vec<f32> {
+    let (px, row) = (VAE_DOWNSAMPLE, IMAGE_SIZE * 3);
+    let (wx, wy, ww, wh) = (roi.x * px, roi.y * px, roi.w * px, roi.h * px);
+    assert_eq!(part.len(), ww * wh * 3, "decoded ROI does not match its window");
+    let mut frame: Vec<f32> = rgb.iter().map(|&v| (v + 1.0) * 0.5).collect();
+    for y in 0..wh {
+        frame[(wy + y) * row + wx * 3..][..ww * 3].copy_from_slice(&part[y * ww * 3..][..ww * 3]);
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roi_frame_places_the_window_and_keeps_the_input_elsewhere() {
+        let rgb: Vec<f32> = (0..IMAGE_SIZE * IMAGE_SIZE * 3).map(|i| (i % 7) as f32 / 3.5 - 1.0).collect();
+        let roi = LatentRect { x: 2, y: 3, w: 4, h: 5 };
+        let part = vec![0.25f32; 32 * 40 * 3];
+        let frame = roi_frame(&rgb, roi, &part);
+        let at = |x: usize, y: usize| (y * IMAGE_SIZE + x) * 3;
+        // Inside: the decoded window, first and last pixel.
+        assert_eq!(frame[at(16, 24)], 0.25);
+        assert_eq!(frame[at(16 + 31, 24 + 39) + 2], 0.25);
+        // Just outside on every side, and the far corner: (rgb + 1) / 2.
+        for (x, y) in [(15, 24), (48, 24), (16, 23), (16, 64), (0, 0), (511, 511)] {
+            assert_eq!(frame[at(x, y)], (rgb[at(x, y)] + 1.0) * 0.5, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn roi_frame_of_the_full_window_is_the_decoded_image() {
+        let rgb = vec![-1.0f32; IMAGE_SIZE * IMAGE_SIZE * 3];
+        let part: Vec<f32> = (0..rgb.len()).map(|i| i as f32).collect();
+        let full = LatentRect { x: 0, y: 0, w: LATENT_SIZE, h: LATENT_SIZE };
+        assert_eq!(roi_frame(&rgb, full, &part), part);
+    }
 
     #[test]
     fn noise_is_seeded_shaped_and_standard_normal() {

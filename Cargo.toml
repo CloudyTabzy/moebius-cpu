@@ -59,6 +59,10 @@ clap = { version = "4", features = ["derive"], optional = true }
 # Already in the tree via safetensors; the eval runner reads/writes the manifest and times.
 serde_json = { version = "1", optional = true }
 
+[dev-dependencies]
+# PNG masks in the ROI parity test (the CLI feature is not needed to run tests).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

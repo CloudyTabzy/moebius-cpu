@@ -8,8 +8,8 @@
 //! speed promise.
 //!
 //! Status: runs end to end and matches upstream PyTorch (`tests/parity.rs`,
-//! `examples/parity.rs`). Still open: the Fast preset's ROI decode and
-//! colour compensation (M8), and the GIMP plugin hookup (M9).
+//! `examples/parity.rs`). ROI decode and compensated paste are in; still
+//! open: the Fast preset's measured parameters (M8) and the GIMP plugin hookup (M9).
 
 pub mod config;
 pub mod engine;

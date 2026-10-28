@@ -3,14 +3,15 @@
 //! three) → GN+SiLU → conv_out. The nearest-2× upsample is fused into the
 //! 3x3 conv (`Conv3x3::upsample2x`), so the 4× tensor is never stored.
 //!
-//! Full-frame only. ROI decoding (Fast preset, `LatentRect`) is left to
-//! the milestone that gates it on quality: the mid-block attention would then
-//! see the window instead of the whole 64² latent.
+//! Everything is fully convolutional except the mid-block attention, so any
+//! `[1, h, w, 4]` latent decodes to `[1, 8h, 8w, 3]`. ROI decoding (Fast preset,
+//! `decode_roi`) decodes a cropped latent window; the attention then sees the
+//! window's tokens only.
 
 use rayon::prelude::*;
 
 use super::encoder::LAYERS;
-use super::{MidBlock, Resnet, Work};
+use super::{LatentRect, MidBlock, Resnet, Work};
 use crate::Result;
 use crate::config::{LATENT_CHANNELS, VAE_BLOCK_OUT_CHANNELS, VAE_DOWNSAMPLE, VAE_EPS, VAE_SCALING_FACTOR};
 use crate::engine::conv::{Conv1x1, Conv3x3};
@@ -68,8 +69,8 @@ impl Decoder {
         })
     }
 
-    /// `latents`: scaled latents `[1, 64, 64, 4]`. Returns RGB `(x + 1) / 2`,
-    /// unclamped, `[1, 512, 512, 3]`.
+    /// `latents`: scaled latents `[1, h, w, 4]`. Returns RGB `(x + 1) / 2`,
+    /// unclamped, `[1, 8h, 8w, 3]` (`[1, 512, 512, 3]` for the full 64² latent).
     pub fn decode(&self, latents: &Tensor, s: &mut Scratch) -> Tensor {
         assert_eq!(latents.c, LATENT_CHANNELS, "VAE decoder expects 4 latent channels");
         // The decoder's 512² maps (up to 268 MB each, three live) must not pile on top of
@@ -95,5 +96,23 @@ impl Decoder {
         let mut out = w.release(s);
         out.data.par_chunks_mut(CHUNK).for_each(|c| c.iter_mut().for_each(|v| *v = (*v + 1.0) * 0.5));
         out
+    }
+
+    /// Decodes the window `roi` of `latents` (`[1, 64, 64, 4]`, scaled) as its own latent.
+    pub fn decode_roi(&self, latents: &Tensor, roi: LatentRect, s: &mut Scratch) -> Tensor {
+        assert_eq!(latents.n, 1, "ROI decode takes a single latent");
+        assert_eq!(latents.c, LATENT_CHANNELS, "VAE decoder expects 4 latent channels");
+        assert!(
+            roi.w > 0 && roi.h > 0 && roi.x + roi.w <= latents.w && roi.y + roi.h <= latents.h,
+            "ROI {roi:?} outside the {}x{} latent",
+            latents.w,
+            latents.h
+        );
+        let mut data = Vec::with_capacity(roi.w * roi.h * LATENT_CHANNELS);
+        for y in roi.y..roi.y + roi.h {
+            let row = (y * latents.w + roi.x) * LATENT_CHANNELS;
+            data.extend_from_slice(&latents.data[row..row + roi.w * LATENT_CHANNELS]);
+        }
+        self.decode(&Tensor::from_vec(data, 1, roi.h, roi.w, LATENT_CHANNELS), s)
     }
 }

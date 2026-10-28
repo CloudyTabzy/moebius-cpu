@@ -12,7 +12,7 @@ use moebius_cpu::unet::blocks::{Downsample, DwResnet};
 use moebius_cpu::unet::lambda::{CrossLambda, SelfLambda};
 use moebius_cpu::unet::load::Loader;
 use moebius_cpu::unet::transformer::MixTransformer;
-use moebius_cpu::vae::Vae;
+use moebius_cpu::vae::{LatentRect, ROI_MARGIN, Vae, roi_window};
 use moebius_cpu::weights::Weights;
 
 fn root() -> PathBuf {
@@ -598,4 +598,91 @@ fn cancel_leaves_image_untouched_and_progress_is_reported() {
     let denoise: Vec<_> = seen.iter().filter(|s| s.0 == Stage::Denoise).collect();
     assert_eq!(denoise.len(), 2, "{seen:?}");
     assert_eq!((denoise[1].1, denoise[1].2), (2, 19));
+}
+
+/// Latent mask of a 512² binary mask: pixel (8y, 8x), as the pipeline does.
+fn latent_mask(mask: &[u8]) -> Vec<f32> {
+    (0..64 * 64).map(|i| if mask[(i / 64 * 8) * 512 + (i % 64) * 8] >= 128 { 1.0 } else { 0.0 }).collect()
+}
+
+/// Same latents, ROI vs full decode: PSNR over the masked pixels (clamped [0, 1], peak 1).
+#[test]
+#[ignore = "needs weights/ and weights/golden/ (~10 s)"]
+fn roi_decode_matches_full_decode_inside_mask() {
+    let vae = Vae::load(&vae_model("f32")).unwrap();
+    let z = tensor(&golden(0), "latents.final");
+    let mask = image::open(root().join("weights/demo/glasses_mask.png")).unwrap().into_luma8().into_raw();
+    let roi = roi_window(&latent_mask(&mask), ROI_MARGIN).expect("glasses mask is not empty");
+    let mut s = Scratch::default();
+
+    let t0 = Instant::now();
+    let full = vae.decode(&z, &mut s);
+    let t_full = t0.elapsed().as_secs_f64();
+    let t0 = Instant::now();
+    let part = vae.decode_roi(&z, roi, &mut s);
+    let t_roi = t0.elapsed().as_secs_f64();
+    assert_eq!(part.shape(), [1, 8 * roi.h, 8 * roi.w, 3]);
+
+    let (mut se, mut n) = (0.0f64, 0usize);
+    for y in 0..512usize {
+        for x in 0..512usize {
+            let (wy, wx) = (y.wrapping_sub(8 * roi.y), x.wrapping_sub(8 * roi.x));
+            if mask[y * 512 + x] < 128 {
+                continue;
+            }
+            assert!(wy < 8 * roi.h && wx < 8 * roi.w, "masked pixel ({x}, {y}) outside the ROI {roi:?}");
+            for c in 0..3 {
+                let a = full.data[(y * 512 + x) * 3 + c].clamp(0.0, 1.0) as f64;
+                let b = part.data[(wy * 8 * roi.w + wx) * 3 + c].clamp(0.0, 1.0) as f64;
+                se += (a - b).powi(2);
+                n += 1;
+            }
+        }
+    }
+    let psnr = -10.0 * (se / n as f64).log10();
+    println!(
+        "roi decode: window {roi:?} ({}x{} px of 512²), PSNR inside mask = {psnr:.2} dB, \
+         full {t_full:.2} s, roi {t_roi:.2} s (ratio {:.2})",
+        8 * roi.w,
+        8 * roi.h,
+        t_roi / t_full
+    );
+    assert!(psnr >= 40.0, "PSNR {psnr:.2} dB < 40 dB");
+}
+
+/// A mask covering (nearly) everything degenerates to the full 64² window, which must
+/// reproduce `decode` bit for bit.
+#[test]
+#[ignore = "needs weights/ and weights/golden/ (~10 s)"]
+fn roi_decode_of_the_full_window_equals_decode() {
+    let vae = Vae::load(&vae_model("f32")).unwrap();
+    let z = tensor(&golden(0), "latents.final");
+    let roi = roi_window(&vec![1.0; 64 * 64], ROI_MARGIN).unwrap();
+    assert_eq!(roi, LatentRect { x: 0, y: 0, w: 64, h: 64 });
+    let mut s = Scratch::default();
+    let full = vae.decode(&z, &mut s);
+    let part = vae.decode_roi(&z, roi, &mut s);
+    assert_eq!(part.shape(), full.shape());
+    assert!(part.data == full.data, "full-window ROI differs from decode");
+}
+
+/// A mask in the top-left corner: the window clamps to the latent border, covers the
+/// mask plus the margin, and decodes to the right shape.
+#[test]
+#[ignore = "needs weights/ and weights/golden/ (~5 s)"]
+fn roi_decode_at_the_corner_clamps_and_covers_the_mask() {
+    let vae = Vae::load(&vae_model("f32")).unwrap();
+    let z = tensor(&golden(0), "latents.final");
+    let mut lat = vec![0.0f32; 64 * 64];
+    for y in 0..3 {
+        for x in 0..3 {
+            lat[y * 64 + x] = 1.0;
+        }
+    }
+    let roi = roi_window(&lat, ROI_MARGIN).unwrap();
+    assert_eq!(roi, LatentRect { x: 0, y: 0, w: 3 + ROI_MARGIN, h: 3 + ROI_MARGIN });
+    let mut s = Scratch::default();
+    let part = vae.decode_roi(&z, roi, &mut s);
+    assert_eq!(part.shape(), [1, 8 * roi.h, 8 * roi.w, 3]);
+    assert!(part.data.iter().all(|v| v.is_finite()));
 }
