@@ -1,0 +1,24 @@
+# Rust build artifacts
+target/
+
+# Model weights: downloaded / converted locally, never committed (docs/PLAN.md §8)
+/weights/
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+# ...except the small kernel parity fixtures the tests need
+!tests/fixtures/*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,59 @@
+[package]
+name = "moebius-cpu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "CPU-only native inference engine for the Moebius 0.22B image-inpainting model"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "moebius_cpu"
+# rlib for the CLI/tests, cdylib for the GIMP plugin (C ABI, see include/moebius_cpu.h).
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "moebius-cli"
+path = "src/bin/moebius-cli.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "gemm_probe"
+
+[features]
+default = []
+# Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
+cli = ["dep:image", "dep:clap"]
+
+[dependencies]
+# Compute: the GEMM microkernels candle itself uses (runtime AVX2/FMA/AVX-512 dispatch).
+gemm = "0.19"
+rayon = "1.11"
+# Weights: f16 safetensors, memory-mapped, widened to f32 per layer at GEMM time.
+safetensors = "0.8"
+memmap2 = "0.9"
+half = { version = "2.7", features = ["bytemuck"] }
+bytemuck = "1"
+# Lanczos3 resize for the 512² crop (matches PIL LANCZOS).
+fast_image_resize = "6.1"
+# Initial latent noise.
+rand = "0.10"
+rand_distr = "0.6"
+thiserror = "2"
+# Physical-core count for the default thread pool size.
+num_cpus = "1.17"
+
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+# Kernels are unusably slow unoptimized; keep tests fast too.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3

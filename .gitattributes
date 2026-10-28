@@ -1,0 +1,2 @@
+# Never apply line-ending conversion to binary test fixtures.
+*.safetensors binary
