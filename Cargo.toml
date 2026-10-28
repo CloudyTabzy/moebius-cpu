@@ -24,10 +24,14 @@ name = "gemm_probe"
 name = "profile"
 required-features = ["cli"]
 
+[[example]]
+name = "eval"
+required-features = ["cli"]
+
 [features]
 default = []
 # Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
-cli = ["dep:image", "dep:clap"]
+cli = ["dep:image", "dep:clap", "dep:serde_json"]
 
 [dependencies]
 # Compute: the GEMM microkernels candle itself uses (runtime AVX2/FMA/AVX-512 dispatch).
@@ -52,6 +56,8 @@ num_cpus = "1.17"
 
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+# Already in the tree via safetensors; the eval runner reads/writes the manifest and times.
+serde_json = { version = "1", optional = true }
 
 [profile.release]
 lto = "fat"
