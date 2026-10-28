@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use moebius_cpu::engine::{Scratch, Tensor};
+use moebius_cpu::unet::blocks::{Downsample, DwResnet};
 use moebius_cpu::unet::lambda::{CrossLambda, SelfLambda};
 use moebius_cpu::unet::load::Loader;
+use moebius_cpu::unet::transformer::MixTransformer;
 use moebius_cpu::weights::Weights;
 
 fn root() -> PathBuf {
@@ -146,5 +148,170 @@ fn lambda_timing() {
             f(&mut out, &mut s);
         }
         println!("{name}-lambda 2x64x64x320: {:.1} ms/forward", t.elapsed().as_secs_f64() * 200.0);
+    }
+}
+
+// ---- Task 4: convolutional blocks and MixTransformer ----
+
+const DOWN0: &str = "diff_model.down_blocks.0";
+const DOWN1: &str = "diff_model.down_blocks.1";
+
+/// `unet.temb` `[2, 1280]` as a `[2, 1, 1, 1280]` tensor.
+fn temb(g: &Weights) -> Tensor {
+    let t = tensor(g, "unet.temb");
+    Tensor::from_vec(t.data, 2, 1, 1, 1280)
+}
+
+fn check(label: &str, got: &Tensor, want: &Tensor, tol: f64) -> f64 {
+    assert_eq!(got.shape(), want.shape(), "{label}: shape");
+    let err = rel_l2(&got.data, &want.data);
+    println!("{label}: rel_l2 = {err:.3e}");
+    assert!(err <= tol, "{label}: rel_l2 {err:e} > {tol:e}");
+    err
+}
+
+fn resnet_checks(dtype: &str, tol: f64) {
+    let (m, g) = (model(dtype), golden(0));
+    let (mut out, mut s) = (Tensor::default(), Scratch::default());
+    let t = temb(&g);
+
+    let r = DwResnet::load(&Loader::new(&m, &format!("{DOWN0}.resnets.0")), 320, 320).unwrap();
+    r.forward(&tensor(&g, "unet.conv_in"), &t, &mut out, &mut s);
+    check(&format!("resnet down0.res0 (identity skip) {dtype}"), &out, &tensor(&g, "unet.down.0.res.0"), tol);
+
+    let r = DwResnet::load(&Loader::new(&m, &format!("{DOWN1}.resnets.0")), 320, 640).unwrap();
+    r.forward(&tensor(&g, "unet.down.0.out"), &t, &mut out, &mut s);
+    check(&format!("resnet down1.res0 (320->640 shortcut) {dtype}"), &out, &tensor(&g, "unet.down.1.res.0"), tol);
+}
+
+fn transformer_checks(dtype: &str, tol: f64) {
+    let (m, g) = (model(dtype), golden(0));
+    let (mut out, mut s) = (Tensor::default(), Scratch::default());
+    let tf = MixTransformer::load(&Loader::new(&m, &format!("{DOWN0}.attentions.0")), 320, &ehs(&g)).unwrap();
+
+    tf.forward_ff(&tensor(&g, "tf0.ff.in"), &mut out, &mut s);
+    check(&format!("ff {dtype}"), &out, &tensor(&g, "tf0.ff.out"), tol);
+
+    tf.forward(&tensor(&g, "unet.down.0.res.0"), &[0, 1], &mut out, &mut s);
+    check(&format!("transformer down0.attn0 {dtype}"), &out, &tensor(&g, "unet.down.0.attn.0"), tol);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn resnet_matches_pytorch() {
+    resnet_checks("f32", 1e-4);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn resnet_matches_pytorch_f16() {
+    resnet_checks("f16", 2e-3);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn transformer_matches_pytorch() {
+    transformer_checks("f32", 1e-4);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn transformer_matches_pytorch_f16() {
+    transformer_checks("f16", 2e-3);
+}
+
+fn downsample_check(dtype: &str, tol: f64) {
+    let (m, g) = (model(dtype), golden(0));
+    let d = Downsample::load(&Loader::new(&m, &format!("{DOWN0}.downsamplers.0")), 320).unwrap();
+    let (mut out, mut s) = (Tensor::default(), Scratch::default());
+    d.forward(&tensor(&g, "unet.down.0.attn.1"), &mut out, &mut s);
+    check(&format!("downsample down0 {dtype}"), &out, &tensor(&g, "unet.down.0.out"), tol);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn downsample_matches_pytorch() {
+    downsample_check("f32", 1e-4);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn downsample_matches_pytorch_f16() {
+    downsample_check("f16", 2e-3);
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn lambda_batch_items_are_independent() {
+    let (m, g) = (model("f32"), golden(0));
+    let l = Loader::new(&m, BLOCK);
+    let selfl = SelfLambda::load(&l.sub("attn1"), 320).unwrap();
+    let cross = CrossLambda::load(&l.sub("attn2"), 320, &ehs(&g)).unwrap();
+    let mut s = Scratch::default();
+
+    // Two different items: the golden map, and the same map flipped left-right and halved.
+    let x0 = tensor(&g, "tf0.attn1.in");
+    let a = Tensor::from_vec(x0.item(0).to_vec(), 1, x0.h, x0.w, x0.c);
+    let mut flipped = a.clone();
+    for y in 0..a.h {
+        for x in 0..a.w {
+            let (src, dst) = ((y * a.w + x) * a.c, (y * a.w + (a.w - 1 - x)) * a.c);
+            for c in 0..a.c {
+                flipped.data[dst + c] = 0.5 * a.data[src + c];
+            }
+        }
+    }
+    let mut batch = Tensor::zeros(2, a.h, a.w, a.c);
+    let half = a.data.len();
+    batch.data[..half].copy_from_slice(&a.data);
+    batch.data[half..].copy_from_slice(&flipped.data);
+    assert!(rel_l2(&a.data, &flipped.data) > 0.1, "test items must differ");
+
+    let alone = |layer: &dyn Fn(&Tensor, usize, &mut Tensor, &mut Scratch), x: &Tensor, br: usize, s: &mut Scratch| {
+        let mut o = Tensor::default();
+        layer(x, br, &mut o, s);
+        o
+    };
+    let self_fn = |x: &Tensor, _br: usize, o: &mut Tensor, s: &mut Scratch| selfl.forward(x, o, s);
+    let cross_fn = |x: &Tensor, br: usize, o: &mut Tensor, s: &mut Scratch| cross.forward(x, &[br], o, s);
+
+    let mut both = Tensor::default();
+    selfl.forward(&batch, &mut both, &mut s);
+    for (i, x) in [&a, &flipped].into_iter().enumerate() {
+        let solo = alone(&self_fn, x, 0, &mut s);
+        let err = rel_l2(both.item(i), &solo.data);
+        println!("self-lambda batch item {i} vs alone: rel_l2 = {err:.3e}");
+        assert!(err <= 1e-6, "self-lambda item {i} leaks: {err:e}");
+    }
+
+    cross.forward(&batch, &[0, 1], &mut both, &mut s);
+    for (i, x) in [&a, &flipped].into_iter().enumerate() {
+        let solo = alone(&cross_fn, x, i, &mut s);
+        let err = rel_l2(both.item(i), &solo.data);
+        println!("cross-lambda batch item {i} vs alone: rel_l2 = {err:.3e}");
+        assert!(err <= 1e-6, "cross-lambda item {i} leaks: {err:e}");
+    }
+}
+
+#[test]
+#[ignore = "timing probe; run with --nocapture"]
+fn blocks_timing() {
+    let (m, g) = (model("f16"), golden(0));
+    let (mut out, mut s) = (Tensor::default(), Scratch::default());
+    let t = temb(&g);
+    let r = DwResnet::load(&Loader::new(&m, &format!("{DOWN0}.resnets.0")), 320, 320).unwrap();
+    let tf = MixTransformer::load(&Loader::new(&m, &format!("{DOWN0}.attentions.0")), 320, &ehs(&g)).unwrap();
+    let x = tensor(&g, "unet.conv_in");
+    let x2 = tensor(&g, "unet.down.0.res.0");
+    for (name, f) in [
+        ("resnet", Box::new(|o: &mut Tensor, s: &mut Scratch| r.forward(&x, &t, o, s)) as Box<dyn Fn(&mut Tensor, &mut Scratch)>),
+        ("transformer", Box::new(|o: &mut Tensor, s: &mut Scratch| tf.forward(&x2, &[0, 1], o, s))),
+    ] {
+        f(&mut out, &mut s);
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            f(&mut out, &mut s);
+        }
+        println!("{name} 2x64x64x320: {:.1} ms/forward", t0.elapsed().as_secs_f64() * 200.0);
     }
 }

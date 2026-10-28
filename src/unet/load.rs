@@ -62,6 +62,30 @@ impl<'w> Loader<'w> {
         Ok(Conv3x3::same(c_in, c_out, weight, Some(l.vec("bias", c_out)?)))
     }
 
+    /// Depthwise 3x3 `<name>.weight` `[3, 3, c]` and `<name>.bias` `[c]`, both f32.
+    pub fn depthwise3x3(&self, name: &str, c: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        let l = self.sub(name);
+        Ok((l.f32s("weight", &[3, 3, c])?, l.vec("bias", c)?))
+    }
+
+    /// Dense 3x3 like `conv3x3` with explicit stride, padding `[top, left, bottom, right]`
+    /// and optional fused nearest-2x upsample of the input.
+    pub fn conv3x3_with(
+        &self,
+        name: &str,
+        c_in: usize,
+        c_out: usize,
+        stride: usize,
+        pad: [usize; 4],
+        upsample2x: bool,
+    ) -> Result<Conv3x3> {
+        let mut conv = self.conv3x3(name, c_in, c_out)?;
+        conv.stride = stride;
+        conv.pad = pad;
+        conv.upsample2x = upsample2x;
+        Ok(conv)
+    }
+
     /// 32-group GroupNorm with affine `<name>.weight` / `<name>.bias`.
     pub fn group_norm(&self, name: &str, c: usize, eps: f32) -> Result<GroupNorm> {
         let l = self.sub(name);
