@@ -24,7 +24,7 @@ fn main() {
     for run in 0..=runs {
         let t0 = Instant::now();
         let mut last = Instant::now();
-        pool.install(|| {
+        let eps = pool.install(|| {
             unet.forward_traced(&x, 900, Guidance::Cfg, &mut s, &mut |name: &str, _t: &Tensor| {
                 let now = Instant::now();
                 if run > 0 {
@@ -33,6 +33,7 @@ fn main() {
                 last = now;
             })
         });
+        s.recycle(eps);
         if run > 0 {
             println!("run {run}: {:.3} s", t0.elapsed().as_secs_f64());
         }

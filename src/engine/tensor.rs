@@ -1,3 +1,8 @@
+use rayon::prelude::*;
+
+/// Pixels per task of the channel concatenation.
+const CONCAT_PIXELS: usize = 256;
+
 /// Dense NHWC f32 activation tensor.
 ///
 /// Buffers are meant to be allocated once and reused every step: kernels
@@ -45,14 +50,26 @@ impl Tensor {
 
     /// Per-pixel channel concatenation `[a ‖ b]`: `[n, h, w, a.c + b.c]`.
     pub fn concat_channels(a: &Tensor, b: &Tensor) -> Tensor {
+        let mut out = Tensor::default();
+        Self::concat_channels_into(a, b, &mut out);
+        out
+    }
+
+    /// [`Tensor::concat_channels`] into a reusable buffer; `out` must alias neither input.
+    pub fn concat_channels_into(a: &Tensor, b: &Tensor, out: &mut Tensor) {
         assert_eq!([a.n, a.h, a.w], [b.n, b.h, b.w], "concat_channels: spatial shapes differ");
         let (ca, cb) = (a.c, b.c);
-        let mut out = Tensor::zeros(a.n, a.h, a.w, ca + cb);
-        for ((o, x), y) in out.data.chunks_exact_mut(ca + cb).zip(a.data.chunks_exact(ca)).zip(b.data.chunks_exact(cb)) {
-            o[..ca].copy_from_slice(x);
-            o[ca..].copy_from_slice(y);
-        }
-        out
+        out.set_shape(a.n, a.h, a.w, ca + cb);
+        out.data
+            .par_chunks_mut(CONCAT_PIXELS * (ca + cb))
+            .zip(a.data.par_chunks(CONCAT_PIXELS * ca))
+            .zip(b.data.par_chunks(CONCAT_PIXELS * cb))
+            .for_each(|((o, x), y)| {
+                for ((o, x), y) in o.chunks_exact_mut(ca + cb).zip(x.chunks_exact(ca)).zip(y.chunks_exact(cb)) {
+                    o[..ca].copy_from_slice(x);
+                    o[ca..].copy_from_slice(y);
+                }
+            });
     }
 }
 
@@ -67,5 +84,15 @@ mod tests {
         let c = Tensor::concat_channels(&a, &b);
         assert_eq!(c.shape(), [1, 1, 2, 5]);
         assert_eq!(c.data, vec![1.0, 2.0, 10.0, 20.0, 30.0, 3.0, 4.0, 40.0, 50.0, 60.0]);
+    }
+
+    #[test]
+    fn concat_channels_into_overwrites_a_dirty_larger_buffer() {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], 1, 1, 2, 2);
+        let b = Tensor::from_vec(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0], 1, 1, 2, 3);
+        let mut out = Tensor::from_vec(vec![-1.0; 40], 1, 4, 2, 5);
+        Tensor::concat_channels_into(&a, &b, &mut out);
+        assert_eq!(out.shape(), [1, 1, 2, 5]);
+        assert_eq!(out.data, Tensor::concat_channels(&a, &b).data);
     }
 }

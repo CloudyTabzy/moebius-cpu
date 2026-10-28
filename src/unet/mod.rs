@@ -164,49 +164,82 @@ impl UNet {
         let temb = self.time.forward(timestep, b, s);
         trace("unet.temb", &temb);
 
-        let input = Tensor::from_vec(x.data.repeat(b), b, x.h, x.w, x.c);
-        let mut h = Tensor::default();
+        // Buffers come from the scratch pool sized by role (`tensor_for`) and go
+        // back as soon as they are dead; see `Scratch::tensor_for`.
+        let px = b * x.h * x.w;
+        let mut input = s.tensor_for(px * x.c);
+        input.set_shape(b, x.h, x.w, x.c);
+        for item in input.data.chunks_exact_mut(x.data.len()) {
+            item.copy_from_slice(&x.data);
+        }
+        let mut h = s.tensor_for(px * BLOCK_OUT_CHANNELS[0]);
         self.conv_in.forward(&input, &mut h, s);
-        drop(input);
+        s.recycle(input);
         trace("unet.conv_in", &h);
 
-        let mut skips = vec![h.clone()];
-        let mut a = Tensor::default();
+        // Every skip is moved onto the stack and read from there (the next block's
+        // input is the stack top), so the only copy is the down -> up hand-over.
+        let mut skips = vec![h];
         for (i, blk) in self.down.iter().enumerate() {
             for (j, (res, attn)) in blk.resnets.iter().zip(&blk.attns).enumerate() {
-                res.forward(&h, &temb, &mut a, s);
+                let top = skips.last().expect("skip stack");
+                let mut a = s.tensor_for(top.pixels() * res.c_out);
+                res.forward(top, &temb, &mut a, s);
                 trace(&format!("unet.down.{i}.res.{j}"), &a);
+                let mut h = s.tensor_for(a.data.len());
                 attn.forward(&a, branches, &mut h, s);
                 trace(&format!("unet.down.{i}.attn.{j}"), &h);
-                skips.push(h.clone());
+                s.recycle(a);
+                skips.push(h);
             }
             if let Some(ds) = &blk.downsample {
-                ds.forward(&h, &mut a, s);
-                std::mem::swap(&mut h, &mut a);
-                skips.push(h.clone());
+                let top = skips.last().expect("skip stack");
+                let mut h = s.tensor_for(top.data.len() / 4);
+                ds.forward(top, &mut h, s);
+                skips.push(h);
             }
-            trace(&format!("unet.down.{i}.out"), &h);
+            trace(&format!("unet.down.{i}.out"), skips.last().expect("skip stack"));
         }
 
+        // The last down output is both the hidden state and the first skip.
+        let last = skips.last().expect("skip stack");
+        let mut h = s.tensor_for(last.data.len());
+        h.set_shape(last.n, last.h, last.w, last.c);
+        h.data.copy_from_slice(&last.data);
         for (i, blk) in self.up.iter().enumerate() {
             for (j, (res, attn)) in blk.resnets.iter().zip(&blk.attns).enumerate() {
                 let skip = skips.pop().expect("skip stack underflow");
-                let cat = Tensor::concat_channels(&h, &skip);
+                let mut cat = s.tensor_for(h.pixels() * res.c_in);
+                Tensor::concat_channels_into(&h, &skip, &mut cat);
+                s.recycle(skip);
+                s.recycle(h);
+                let mut a = s.tensor_for(cat.pixels() * res.c_out);
                 res.forward(&cat, &temb, &mut a, s);
+                s.recycle(cat);
                 trace(&format!("unet.up.{i}.res.{j}"), &a);
+                h = s.tensor_for(a.data.len());
                 attn.forward(&a, branches, &mut h, s);
+                s.recycle(a);
                 trace(&format!("unet.up.{i}.attn.{j}"), &h);
             }
             if let Some(us) = &blk.upsample {
+                let mut a = s.tensor_for(h.data.len() * 4);
                 us.forward(&h, &mut a, s);
-                std::mem::swap(&mut h, &mut a);
+                s.recycle(h);
+                h = a;
             }
             trace(&format!("unet.up.{i}.out"), &h);
         }
+        assert!(skips.is_empty(), "skip stack not consumed");
 
+        let mut a = s.tensor_for(h.data.len());
         self.norm_out.forward(&h, None, true, &mut a);
-        self.conv_out.forward(&a, &mut h, s);
-        trace("unet.out", &h);
-        h
+        let mut out = s.tensor_for(h.pixels() * UNET_OUT_CHANNELS);
+        self.conv_out.forward(&a, &mut out, s);
+        trace("unet.out", &out);
+        s.recycle(a);
+        s.recycle(h);
+        s.recycle(temb);
+        out
     }
 }

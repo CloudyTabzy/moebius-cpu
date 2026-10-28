@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use super::encoder::LAYERS;
 use super::{MidBlock, Resnet, Work};
 use crate::Result;
-use crate::config::{LATENT_CHANNELS, VAE_BLOCK_OUT_CHANNELS, VAE_EPS, VAE_SCALING_FACTOR};
+use crate::config::{LATENT_CHANNELS, VAE_BLOCK_OUT_CHANNELS, VAE_DOWNSAMPLE, VAE_EPS, VAE_SCALING_FACTOR};
 use crate::engine::conv::{Conv1x1, Conv3x3};
 use crate::engine::norm::GroupNorm;
 use crate::engine::{Scratch, Tensor};
@@ -72,10 +72,14 @@ impl Decoder {
     /// unclamped, `[1, 512, 512, 3]`.
     pub fn decode(&self, latents: &Tensor, s: &mut Scratch) -> Tensor {
         assert_eq!(latents.c, LATENT_CHANNELS, "VAE decoder expects 4 latent channels");
-        let mut z = latents.clone();
+        // The decoder's 512² maps (up to 268 MB each, four live) must not pile on top of
+        // whatever the denoiser left in the pool: free everything smaller than one map.
+        let map = latents.h * latents.w * VAE_DOWNSAMPLE * VAE_DOWNSAMPLE * VAE_BLOCK_OUT_CHANNELS[0];
+        s.release_below(map);
+        let mut z = latents.clone(); // 64 KB: not worth a pooled buffer
         z.data.par_chunks_mut(CHUNK).for_each(|c| c.iter_mut().for_each(|v| *v /= VAE_SCALING_FACTOR));
 
-        let mut w = Work::default();
+        let mut w = Work::new(s, map);
         self.post_quant_conv.forward(&z, &mut w.next, None, s);
         self.conv_in.forward(&w.next, &mut w.cur, s);
         w.mid(&self.mid, s);
@@ -88,7 +92,7 @@ impl Decoder {
             }
         }
         w.norm_silu_conv(&self.norm_out, &self.conv_out, s);
-        let mut out = w.cur;
+        let mut out = w.release(s);
         out.data.par_chunks_mut(CHUNK).for_each(|c| c.iter_mut().for_each(|v| *v = (*v + 1.0) * 0.5));
         out
     }

@@ -48,12 +48,21 @@ impl TimeEmbedding {
     pub fn forward(&self, t: usize, batch: usize, s: &mut Scratch) -> Tensor {
         let mut sin = [0.0f32; TIME_PROJ_DIM];
         timestep_sinusoid(t, &mut sin);
-        let x = Tensor::from_vec(sin.to_vec(), 1, 1, 1, TIME_PROJ_DIM);
-        let (mut a, mut b) = (Tensor::default(), Tensor::default());
+        let (mut x, mut a, mut b) = (s.tensor_for(TIME_PROJ_DIM), s.tensor_for(TIME_EMBED_DIM), s.tensor_for(TIME_EMBED_DIM));
+        let mut out = s.tensor_for(batch * TIME_EMBED_DIM);
+        x.set_shape(1, 1, 1, TIME_PROJ_DIM);
+        x.data.copy_from_slice(&sin);
         self.linear_1.forward(&x, &mut a, None, s);
         silu_inplace(&mut a.data);
         self.linear_2.forward(&a, &mut b, None, s);
-        Tensor::from_vec(b.data.repeat(batch), batch, 1, 1, TIME_EMBED_DIM)
+        out.set_shape(batch, 1, 1, TIME_EMBED_DIM);
+        for item in out.data.chunks_exact_mut(TIME_EMBED_DIM) {
+            item.copy_from_slice(&b.data);
+        }
+        s.recycle(x);
+        s.recycle(a);
+        s.recycle(b);
+        out
     }
 }
 

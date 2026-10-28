@@ -109,13 +109,13 @@ impl SelfLambda {
         assert_eq!(x.c, self.c, "SelfLambda channels");
         let (hh, ww, c, k) = (x.h, x.w, self.c, self.k);
         let hw = hh * ww;
-        let (mut q, mut kt, mut vt) = (Tensor::default(), Tensor::default(), Tensor::default());
+        let (mut q, mut kt, mut vt) = (s.tensor_for(x.data.len()), s.tensor_for(x.pixels() * k), s.tensor_for(x.pixels() * k));
         self.to_q.forward(x, &mut q, None, s);
         self.to_k.forward(x, &mut kt, None, s);
         self.to_v.forward(x, &mut vt, None, s);
         out.set_shape(x.n, hh, ww, c);
 
-        let mut a = vec![0.0f32; BAND_ROWS.min(hh) * ww * HEADS * TAPS_B];
+        let mut a = s.vec_buf(BAND_ROWS.min(hh) * ww * HEADS * TAPS_B);
         for b in 0..x.n {
             let qi = &q.data[b * hw * c..(b + 1) * hw * c];
             let vi = &vt.data[b * hw * k..(b + 1) * hw * k];
@@ -145,6 +145,10 @@ impl SelfLambda {
                 });
             }
         }
+        s.recycle_vec(a);
+        s.recycle(q);
+        s.recycle(kt);
+        s.recycle(vt);
     }
 }
 
@@ -251,7 +255,7 @@ impl CrossLambda {
         assert_eq!(branches.len(), x.n, "one branch per batch item");
         assert_eq!(x.h * x.w, self.n, "CrossLambda input size does not match the position table");
         let (c, k, hw) = (self.c, self.k, x.h * x.w);
-        let mut q = Tensor::default();
+        let mut q = s.tensor_for(x.data.len());
         self.to_q.forward(x, &mut q, None, s);
         out.set_shape(x.n, x.h, x.w, c);
         for (b, &br) in branches.iter().enumerate() {
@@ -266,6 +270,7 @@ impl CrossLambda {
                 position_term(q, e, &self.v[br], o, k);
             });
         }
+        s.recycle(q);
     }
 }
 

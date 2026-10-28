@@ -242,7 +242,9 @@ impl Engine {
         let (z_img, z_masked) = if params.single_encode {
             let masked = Tensor::from_vec(masked, 1, IMAGE_SIZE, IMAGE_SIZE, 3);
             let z = self.pool.install(|| self.vae.encode(&masked, &noise.vae_masked, &mut scratch));
-            (z.data.clone(), z.data)
+            let v = z.data.to_vec();
+            scratch.recycle(z);
+            (v.clone(), v)
         } else {
             let images = Tensor::from_vec([rgb, masked].concat(), 2, IMAGE_SIZE, IMAGE_SIZE, 3);
             let noises = Tensor::from_vec(
@@ -253,7 +255,9 @@ impl Engine {
                 LATENT_CHANNELS,
             );
             let z = self.pool.install(|| self.vae.encode(&images, &noises, &mut scratch));
-            (z.item(0).to_vec(), z.item(1).to_vec())
+            let pair = (z.item(0).to_vec(), z.item(1).to_vec());
+            scratch.recycle(z);
+            pair
         };
         report(Stage::Encode, 1, 1)?;
 
@@ -298,9 +302,11 @@ impl Engine {
                 for ((o, &u), &c) in eps.iter_mut().zip(u).zip(c) {
                     *o = u + params.guidance * (c - u);
                 }
+                scratch.recycle(e);
             } else {
                 let e = self.pool.install(|| self.unet.forward(&input, t, Guidance::CondOnly, &mut scratch));
                 eps.copy_from_slice(e.item(0));
+                scratch.recycle(e);
             }
             ddim.step(&eps, t, &mut x);
             report(Stage::Denoise, i + 1, steps.len())?;
@@ -316,7 +322,9 @@ impl Engine {
         report(Stage::Decode, 1, 1)?;
 
         // 10 (first half): 8-bit truncation, resized back to the window.
-        Ok(from_model(&decoded.data, plan.side))
+        let result = from_model(&decoded.data, plan.side);
+        scratch.recycle(decoded);
+        Ok(result)
     }
 }
 

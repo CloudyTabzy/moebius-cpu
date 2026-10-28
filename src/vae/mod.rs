@@ -85,7 +85,6 @@ impl Vae {
 /// Four activation buffers reused by every layer: the hidden state `cur`, its
 /// successor `next`, and two scratch tensors for resnet internals. Layers write
 /// into `next` and swap, so no feature map is copied.
-#[derive(Default)]
 pub(crate) struct Work {
     pub cur: Tensor,
     pub next: Tensor,
@@ -94,6 +93,20 @@ pub(crate) struct Work {
 }
 
 impl Work {
+    /// Takes four buffers of `len` elements (the largest feature map to come) from
+    /// the scratch pool; give them back with [`Work::release`].
+    pub fn new(s: &mut Scratch, len: usize) -> Self {
+        Self { cur: s.tensor_for(len), next: s.tensor_for(len), a: s.tensor_for(len), b: s.tensor_for(len) }
+    }
+
+    /// Returns the buffers to the pool, except `cur`, which is handed to the caller.
+    pub fn release(self, s: &mut Scratch) -> Tensor {
+        s.recycle(self.next);
+        s.recycle(self.a);
+        s.recycle(self.b);
+        self.cur
+    }
+
     pub fn resnet(&mut self, r: &Resnet, s: &mut Scratch) {
         r.forward(&self.cur, &mut self.next, &mut self.a, &mut self.b, s);
         std::mem::swap(&mut self.cur, &mut self.next);
@@ -186,7 +199,8 @@ impl MidAttention {
 
     /// `out` is reshaped like `x` and must not alias it.
     pub fn forward(&self, x: &Tensor, out: &mut Tensor, s: &mut Scratch) {
-        let (mut t, mut q, mut k, mut v) = (Tensor::default(), Tensor::default(), Tensor::default(), Tensor::default());
+        let len = x.data.len();
+        let (mut t, mut q, mut k, mut v) = (s.tensor_for(len), s.tensor_for(len), s.tensor_for(len), s.tensor_for(len));
         self.norm.forward(x, None, false, &mut t);
         self.to_q.forward(&t, &mut q, None, s);
         self.to_k.forward(&t, &mut k, None, s);
@@ -194,7 +208,7 @@ impl MidAttention {
 
         let (hw, c) = (x.h * x.w, x.c);
         let scale = 1.0 / (c as f32).sqrt();
-        let mut scores = vec![0.0f32; BAND.min(hw) * hw];
+        let mut scores = s.vec_buf(BAND.min(hw) * hw);
         let o = &mut t; // the GN output is dead: reuse its buffer for the attention output
         for b in 0..x.n {
             let item = b * hw * c..(b + 1) * hw * c;
@@ -210,6 +224,10 @@ impl MidAttention {
             }
         }
         self.to_out.forward(o, out, Some(x), s);
+        s.recycle_vec(scores);
+        for t in [t, q, k, v] {
+            s.recycle(t);
+        }
     }
 }
 

@@ -77,28 +77,42 @@ impl Encoder {
         assert_eq!(images.c, IMAGE_CHANNELS, "VAE encoder expects RGB");
         assert_eq!(noise.shape(), [images.n, images.h / 8, images.w / 8, LATENT_CHANNELS], "VAE noise shape");
 
-        let mut w = Work::default();
-        self.conv_in.forward(images, &mut w.cur, s);
-        for block in &self.down {
-            for r in &block.resnets {
-                w.resnet(r, s);
+        // Items run one after the other: the feature maps are 128 MB per item and
+        // tensor, and the items are independent, so batching only costs memory.
+        let (h, w_px) = (images.h, images.w);
+        let item_px = h * w_px;
+        let zl = (h / 8) * (w_px / 8) * LATENT_CHANNELS;
+        let mut w = Work::new(s, item_px * VAE_BLOCK_OUT_CHANNELS[0]);
+        let mut input = s.tensor_for(item_px * IMAGE_CHANNELS);
+        let mut moments = s.tensor_for(2 * zl);
+        let mut z = s.tensor_for(images.n * zl);
+        z.set_shape(images.n, h / 8, w_px / 8, LATENT_CHANNELS);
+        for b in 0..images.n {
+            input.set_shape(1, h, w_px, IMAGE_CHANNELS);
+            input.data.copy_from_slice(images.item(b));
+            self.conv_in.forward(&input, &mut w.cur, s);
+            for block in &self.down {
+                for r in &block.resnets {
+                    w.resnet(r, s);
+                }
+                if let Some(d) = &block.downsample {
+                    w.conv(d, s);
+                }
             }
-            if let Some(d) = &block.downsample {
-                w.conv(d, s);
-            }
-        }
-        w.mid(&self.mid, s);
-        w.norm_silu_conv(&self.norm_out, &self.conv_out, s);
-        let mut moments = Tensor::default();
-        self.quant_conv.forward(&w.cur, &mut moments, None, s);
+            w.mid(&self.mid, s);
+            w.norm_silu_conv(&self.norm_out, &self.conv_out, s);
+            self.quant_conv.forward(&w.cur, &mut moments, None, s);
 
-        let mut z = Tensor::default();
-        z.set_shape(moments.n, moments.h, moments.w, LATENT_CHANNELS);
-        z.data
-            .par_chunks_mut(LATENT_CHANNELS * SAMPLE_PIXELS)
-            .zip(moments.data.par_chunks(2 * LATENT_CHANNELS * SAMPLE_PIXELS))
-            .zip(noise.data.par_chunks(LATENT_CHANNELS * SAMPLE_PIXELS))
-            .for_each(|((z, m), n)| sample(m, n, z));
+            z.data[b * zl..(b + 1) * zl]
+                .par_chunks_mut(LATENT_CHANNELS * SAMPLE_PIXELS)
+                .zip(moments.data.par_chunks(2 * LATENT_CHANNELS * SAMPLE_PIXELS))
+                .zip(noise.data[b * zl..(b + 1) * zl].par_chunks(LATENT_CHANNELS * SAMPLE_PIXELS))
+                .for_each(|((z, m), n)| sample(m, n, z));
+        }
+        let cur = w.release(s);
+        s.recycle(cur);
+        s.recycle(input);
+        s.recycle(moments);
         z
     }
 }

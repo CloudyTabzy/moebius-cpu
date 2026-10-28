@@ -45,10 +45,11 @@ impl DwConv2d {
 
     /// `out` is reshaped to `[n, h, w, c_out]`; must not alias `x`.
     pub fn forward(&self, x: &Tensor, out: &mut Tensor, s: &mut Scratch) {
-        let mut mid = Tensor::default();
+        let mut mid = s.tensor_for(x.data.len());
         depthwise3x3(x, &self.dw_weight, &self.dw_bias, Epilogue::Relu, &mut mid);
         let skip = (self.c_in == self.c_out).then_some(x);
         self.pw.forward(&mid, out, skip, s);
+        s.recycle(mid);
     }
 }
 
@@ -84,15 +85,19 @@ impl DwResnet {
         assert_eq!(x.c, self.c_in, "DwResnet input channels");
         assert_eq!((temb.n, temb.h * temb.w, temb.c), (x.n, 1, TIME_EMBED_DIM), "DwResnet temb shape");
 
-        let (mut a, mut b) = (Tensor::default(), Tensor::default());
+        let (mut a, mut b) = (s.tensor_for(x.data.len()), s.tensor_for(x.pixels() * self.c_out));
         self.norm1.forward(x, None, true, &mut a);
         self.conv1.forward(&a, &mut b, s);
 
-        let mut t = temb.clone();
+        let mut t = s.tensor_for(temb.data.len());
+        t.set_shape(temb.n, temb.h, temb.w, temb.c);
+        t.data.copy_from_slice(&temb.data);
         silu_inplace(&mut t.data);
-        let mut tp = Tensor::default();
+        let mut tp = s.tensor_for(temb.n * self.c_out);
         self.time_emb_proj.forward(&t, &mut tp, None, s);
         self.norm2.forward(&b, Some(&tp.data), true, &mut a);
+        s.recycle(t);
+        s.recycle(tp);
         self.conv2.forward(&a, out, s);
 
         match &self.shortcut {
@@ -102,6 +107,8 @@ impl DwResnet {
             }
             None => add_inplace(&mut out.data, &x.data),
         }
+        s.recycle(a);
+        s.recycle(b);
     }
 }
 

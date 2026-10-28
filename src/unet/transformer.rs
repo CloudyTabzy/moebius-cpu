@@ -90,7 +90,8 @@ impl MixTransformer {
     /// `out` is reshaped to the same shape and must not alias `x`.
     pub fn forward(&self, x: &Tensor, branches: &[usize], out: &mut Tensor, s: &mut Scratch) {
         assert_eq!(x.c, self.c, "MixTransformer channels");
-        let (mut t, mut u, mut h) = (Tensor::default(), Tensor::default(), Tensor::default());
+        let len = x.data.len();
+        let (mut t, mut u, mut h) = (s.tensor_for(len), s.tensor_for(len), s.tensor_for(len));
 
         self.norm.forward(x, None, false, &mut t);
         self.proj_in.forward(&t, &mut h, None, s);
@@ -107,6 +108,9 @@ impl MixTransformer {
         self.ffn(&t, Some(&h), &mut u, s);
 
         self.proj_out.forward(&u, out, Some(x), s);
+        s.recycle(t);
+        s.recycle(u);
+        s.recycle(h);
     }
 
     /// MixFFN alone (`x` already layer-normed), no residual. Public for parity tests.
@@ -115,10 +119,12 @@ impl MixTransformer {
     }
 
     fn ffn(&self, x: &Tensor, residual: Option<&Tensor>, out: &mut Tensor, s: &mut Scratch) {
-        let (mut a, mut b) = (Tensor::default(), Tensor::default());
+        let (mut a, mut b) = (s.tensor_for(x.pixels() * self.inverted.c_out), s.tensor_for(x.pixels() * self.point.c_in));
         self.inverted.forward(x, &mut a, None, s);
         silu_inplace(&mut a.data);
         depthwise3x3(&a, &self.dw_weight, &self.dw_bias, Epilogue::GluSilu, &mut b);
         self.point.forward(&b, out, residual, s);
+        s.recycle(a);
+        s.recycle(b);
     }
 }
