@@ -1,9 +1,9 @@
 """Convert upstream checkpoints to moebius-cpu safetensors (M1).
 
     python tools/convert_weights.py \
-        --unet  weight/Moebius/ft_places2/diffusion_pytorch_model.bin \
-        --vae   weight/vae \
-        --out   weights/
+        --unet  weights/upstream/ft_ffhq/diffusion_pytorch_model.bin \
+        --vae   weights/upstream/vae \
+        --out   weights/ft_ffhq/
 
 Writes `unet.safetensors` and `vae.safetensors` with metadata
 `format = moebius-cpu/1` (src/weights.rs::FORMAT_VERSION), plus the source

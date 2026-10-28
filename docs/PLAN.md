@@ -199,6 +199,27 @@ Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.
 Sources: HF `hustvl/Moebius` (`ft_places2` for general scenes; `ft_celebahq` / `ft_ffhq` for
 portraits) and `hustvl/PixelHacker/vae`. All Apache-2.0.
 
+Local layout (`weights/` is git-ignored), mirroring the HF repos:
+
+```
+weights/
+  upstream/<variant>/diffusion_pytorch_model.bin   UNet checkpoints as downloaded
+  upstream/vae/{config.json, diffusion_pytorch_model.bin}
+  <variant>/unet.safetensors, vae.safetensors      converter output, one dir per variant
+```
+
+UNet checkpoint SHA-256 (HF LFS oids, 2026-10-28). The converter records the hash in metadata:
+
+| Variant | SHA-256 | Local |
+|---|---|---|
+| `pretrained` | `6c9ee08ce467af48767b74416646d82f8a0c1dcfb558c478e635cef0ca8b2ad2` | |
+| `ft_places2` | `6525afb888e55f9b5c74fa0a5d19ca0762d720d6c716fb0f8422fbeb6868a09a` | |
+| `ft_celebahq` | `9d26630d91cf9748ed43541669197cf5d63fbb28793d0c1c5dc7c07028ad9045` | |
+| `ft_ffhq` | `ddd5b81b3034dea2bb380c574517ebbf24957903d99319fa8bbb8e69ca9d5606` | ✅ validated: 1,203 tensors match the manifest |
+
+f16 check on `ft_ffhq`: only one tensor exceeds the f16 range,
+`down_blocks.0…attn2.norm_v.running_var` (9.9e4), a BatchNorm statistic that is folded away.
+
 ## 9. Verification
 
 | Gate | Criterion |
