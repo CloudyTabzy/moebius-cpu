@@ -12,6 +12,7 @@ use moebius_cpu::unet::blocks::{Downsample, DwResnet};
 use moebius_cpu::unet::lambda::{CrossLambda, SelfLambda};
 use moebius_cpu::unet::load::Loader;
 use moebius_cpu::unet::transformer::MixTransformer;
+use moebius_cpu::vae::Vae;
 use moebius_cpu::weights::Weights;
 
 fn root() -> PathBuf {
@@ -418,4 +419,107 @@ fn unet_forward_timing() {
         .collect();
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!("unet forward Cfg b=2 f16: median {:.2} s (runs {times:.2?})", times[1]);
+}
+
+/// Converted VAE weights; `dtype` is "f16" or "f32".
+fn vae_model(dtype: &str) -> Weights {
+    let dir = if dtype == "f32" { "ft_places2-f32" } else { "ft_places2" };
+    let path = root().join(format!("weights/{dir}/vae.safetensors"));
+    Weights::open(&path).unwrap_or_else(|e| panic!("{e}; produce it with `python tools/convert_weights.py --dtype {dtype}`"))
+}
+
+/// Golden case-0 VAE inputs as one batch `[image, masked image]` in [-1, 1],
+/// computed like numpy (`v/255.*2-1` in f64, mask01 = mask >= 127.5, masked = image·(1−mask01)),
+/// and the matching noise batch.
+fn vae_batch(g: &Weights) -> (Tensor, Tensor) {
+    let (img, mask) = (tensor(g, "input.image"), tensor(g, "input.mask"));
+    let norm: Vec<f32> = img.data.iter().map(|&v| (v as f64 / 255.0 * 2.0 - 1.0) as f32).collect();
+    let mut both = Vec::with_capacity(2 * norm.len());
+    both.extend_from_slice(&norm);
+    both.extend(norm.iter().enumerate().map(|(i, &v)| if mask.data[i / 3] >= 127.5 { 0.0 } else { v }));
+    let (n1, n2) = (tensor(g, "noise.vae_img"), tensor(g, "noise.vae_masked"));
+    let mut noise = n1.data.clone();
+    noise.extend_from_slice(&n2.data);
+    (Tensor::from_vec(both, 2, 512, 512, 3), Tensor::from_vec(noise, 2, 64, 64, 4))
+}
+
+/// Returns (rel_l2 of image latents, rel_l2 of masked-image latents).
+fn vae_encode_errs(dtype: &str) -> [f64; 2] {
+    let (m, g) = (vae_model(dtype), golden(0));
+    let vae = Vae::load(&m).unwrap();
+    let (images, noise) = vae_batch(&g);
+    let mut s = Scratch::default();
+    let z = vae.encode(&images, &noise, &mut s);
+    assert_eq!(z.shape(), [2, 64, 64, 4]);
+    [("vae.latents", 0), ("vae.masked_latents", 1)].map(|(name, i)| {
+        let want = tensor(&g, name);
+        let e = rel_l2(z.item(i), &want.data);
+        println!("vae encode {name} {dtype}: rel_l2 = {e:.3e}");
+        e
+    })
+}
+
+fn vae_decode_err(dtype: &str) -> f64 {
+    let (m, g) = (vae_model(dtype), golden(0));
+    let vae = Vae::load(&m).unwrap();
+    let z = tensor(&g, "latents.final");
+    let mut s = Scratch::default();
+    let out = vae.decode(&z, &mut s);
+    let want = tensor(&g, "vae.decoded");
+    assert_eq!(out.shape(), want.shape());
+    let e = rel_l2(&out.data, &want.data);
+    println!("vae decode {dtype}: rel_l2 = {e:.3e}");
+    e
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn vae_encode_matches_pytorch() {
+    for e in vae_encode_errs("f32") {
+        assert!(e <= 1e-3, "rel_l2 {e:e}");
+    }
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn vae_decode_matches_pytorch() {
+    let e = vae_decode_err("f32");
+    assert!(e <= 1e-3, "rel_l2 {e:e}");
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn vae_matches_pytorch_f16() {
+    for e in vae_encode_errs("f16") {
+        assert!(e <= 2e-3, "encode rel_l2 {e:e}");
+    }
+    let e = vae_decode_err("f16");
+    assert!(e <= 2e-3, "decode rel_l2 {e:e}");
+}
+
+#[test]
+#[ignore = "timing probe; run with --nocapture"]
+fn vae_timing() {
+    let (m, g) = (vae_model("f16"), golden(0));
+    let vae = Vae::load(&m).unwrap();
+    let (images, noise) = vae_batch(&g);
+    let z = tensor(&g, "latents.final");
+    let mut s = Scratch::default();
+    vae.encode(&images, &noise, &mut s);
+    vae.decode(&z, &mut s);
+    let median = |f: &mut dyn FnMut()| {
+        let mut t: Vec<f64> = (0..3)
+            .map(|_| {
+                let t0 = Instant::now();
+                f();
+                t0.elapsed().as_secs_f64()
+            })
+            .collect();
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (t[1], t)
+    };
+    let (e, runs) = median(&mut || drop(vae.encode(&images, &noise, &mut s)));
+    println!("vae encode b=2 f16: median {e:.2} s (runs {runs:.2?})");
+    let (d, runs) = median(&mut || drop(vae.decode(&z, &mut s)));
+    println!("vae decode b=1 f16: median {d:.2} s (runs {runs:.2?})");
 }
