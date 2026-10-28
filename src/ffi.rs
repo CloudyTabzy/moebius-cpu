@@ -33,6 +33,7 @@ pub const MOEBIUS_PRESET_FAST: u32 = 1;
 pub const MOEBIUS_PASTE_DEFAULT: u32 = 0;
 pub const MOEBIUS_PASTE_NONE: u32 = 1;
 pub const MOEBIUS_PASTE_FEATHER: u32 = 2;
+/// Not ported yet (M8): currently identical to `MOEBIUS_PASTE_FEATHER`.
 pub const MOEBIUS_PASTE_FEATHER_COMPENSATE: u32 = 3;
 
 /// Opaque handle.

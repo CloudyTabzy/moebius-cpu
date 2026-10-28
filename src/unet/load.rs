@@ -5,7 +5,7 @@
 //! (`weight`, `bias`, ...) and gets shape-checked, precision-preserving
 //! parameters back.
 
-use crate::Result;
+use crate::{Error, Result};
 use crate::engine::Param;
 use crate::engine::conv::{Conv1x1, Conv3x3};
 use crate::engine::norm::GroupNorm;
@@ -88,7 +88,11 @@ impl<'w> Loader<'w> {
 
     /// 32-group GroupNorm with affine `<name>.weight` / `<name>.bias`.
     pub fn group_norm(&self, name: &str, c: usize, eps: f32) -> Result<GroupNorm> {
+        let groups = crate::config::GROUP_NORM_GROUPS;
+        if c % groups != 0 {
+            return Err(Error::Weights(format!("{}: {c} channels not divisible by {groups} groups", self.key(name))));
+        }
         let l = self.sub(name);
-        Ok(GroupNorm { groups: crate::config::GROUP_NORM_GROUPS, eps, gamma: l.vec("weight", c)?, beta: l.vec("bias", c)? })
+        Ok(GroupNorm { groups, eps, gamma: l.vec("weight", c)?, beta: l.vec("bias", c)? })
     }
 }

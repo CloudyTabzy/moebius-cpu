@@ -41,7 +41,6 @@
 //! 14.3 M-parameter table. `E` is tied to N = 64²/32²/16², hence the hard
 //! 512² input size.
 
-
 use rayon::prelude::*;
 
 use super::load::Loader;
