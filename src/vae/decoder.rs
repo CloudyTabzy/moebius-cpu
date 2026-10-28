@@ -72,7 +72,7 @@ impl Decoder {
     /// unclamped, `[1, 512, 512, 3]`.
     pub fn decode(&self, latents: &Tensor, s: &mut Scratch) -> Tensor {
         assert_eq!(latents.c, LATENT_CHANNELS, "VAE decoder expects 4 latent channels");
-        // The decoder's 512² maps (up to 268 MB each, four live) must not pile on top of
+        // The decoder's 512² maps (up to 268 MB each, three live) must not pile on top of
         // whatever the denoiser left in the pool: free everything smaller than one map.
         let map = latents.h * latents.w * VAE_DOWNSAMPLE * VAE_DOWNSAMPLE * VAE_BLOCK_OUT_CHANNELS[0];
         s.release_below(map);

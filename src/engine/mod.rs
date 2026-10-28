@@ -31,6 +31,8 @@ pub struct Scratch {
     pub wino_v: Vec<f32>,
     pub wino_m: Vec<f32>,
     pub wino_u: Vec<f32>,
+    /// Normalised input rows of one Winograd band (GroupNorm prologue).
+    pub wino_strip: Vec<f32>,
     /// Recycled activation tensors (LIFO), see [`Scratch::tensor`].
     pool: Vec<Tensor>,
     /// Recycled plain buffers (LIFO), see [`Scratch::vec_buf`].

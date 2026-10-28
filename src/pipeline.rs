@@ -259,6 +259,9 @@ impl Engine {
             scratch.recycle(z);
             pair
         };
+        // The encoder's 512² feature maps (3 x 134 MB) are dead until the decoder: do not
+        // keep them resident through the whole denoising loop.
+        scratch.release_below(usize::MAX);
         report(Stage::Encode, 1, 1)?;
 
         // 5: nearest downsample of the mask (torch `interpolate` picks pixel (8y, 8x)).

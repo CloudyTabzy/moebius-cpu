@@ -26,20 +26,45 @@ pub struct GroupNorm {
     pub beta: Vec<f32>,
 }
 
+/// Per-item, per-channel `y = [SiLU](x·scale + shift)` that a GroupNorm applies
+/// (item-major, `n·c` entries each). Splitting it from the apply pass lets a
+/// consumer (the Winograd conv's input gather) apply it on the fly instead of
+/// reading a materialised normalised tensor.
+pub struct Affine {
+    pub scale: Vec<f32>,
+    pub shift: Vec<f32>,
+    pub silu: bool,
+}
+
 impl GroupNorm {
     /// `out = [SiLU](GN(x + add[item]))`. `add`: `[n, c]` or `None`.
     pub fn forward(&self, x: &Tensor, add: Option<&[f32]>, silu_out: bool, out: &mut Tensor) {
+        let aff = self.affine(x, add, silu_out);
+        let c = x.c;
+        out.set_shape(x.n, x.h, x.w, c);
+        let item = x.h * x.w * c;
+        for b in 0..x.n {
+            let (scale, shift) = (&aff.scale[b * c..(b + 1) * c], &aff.shift[b * c..(b + 1) * c]);
+            out.data[b * item..(b + 1) * item]
+                .par_chunks_mut(STATS_CHUNK * c)
+                .zip(x.data[b * item..(b + 1) * item].par_chunks(STATS_CHUNK * c))
+                .for_each(|(dst, src)| apply_affine(src, scale, shift, silu_out, dst));
+        }
+    }
+
+    /// The statistics pass: per-item channel `scale`/`shift` such that
+    /// `GN(x + add) = x·scale + shift`. `add`: `[n, c]` or `None`.
+    pub fn affine(&self, x: &Tensor, add: Option<&[f32]>, silu_out: bool) -> Affine {
         let (c, g) = (x.c, self.groups);
         assert!(c % g == 0, "channels not divisible by groups");
         assert_eq!(self.gamma.len(), c, "GroupNorm gamma size");
         if let Some(a) = add {
             assert_eq!(a.len(), x.n * c, "GroupNorm add size");
         }
-        out.set_shape(x.n, x.h, x.w, c);
         let item = x.h * x.w * c;
         let count = (x.h * x.w * (c / g)) as f64;
-        let mut scale = vec![0.0f32; c];
-        let mut shift = vec![0.0f32; c];
+        let mut scale = vec![0.0f32; x.n * c];
+        let mut shift = vec![0.0f32; x.n * c];
         for b in 0..x.n {
             let src = &x.data[b * item..(b + 1) * item];
             let add_b = add.map(|a| &a[b * c..(b + 1) * c]);
@@ -71,15 +96,12 @@ impl GroupNorm {
                 for ch in gi * cg..(gi + 1) * cg {
                     let sc = rstd * self.gamma[ch] as f64;
                     let pre = add_b.map_or(0.0, |a| a[ch] as f64);
-                    scale[ch] = sc as f32;
-                    shift[ch] = (self.beta[ch] as f64 + (pre - mean) * sc) as f32;
+                    scale[b * c + ch] = sc as f32;
+                    shift[b * c + ch] = (self.beta[ch] as f64 + (pre - mean) * sc) as f32;
                 }
             }
-            out.data[b * item..(b + 1) * item]
-                .par_chunks_mut(STATS_CHUNK * c)
-                .zip(src.par_chunks(STATS_CHUNK * c))
-                .for_each(|(dst, src)| affine(src, &scale, &shift, silu_out, dst));
         }
+        Affine { scale, shift, silu: silu_out }
     }
 }
 
@@ -109,7 +131,7 @@ multiversion! {
 
 multiversion! {
     /// `dst = [SiLU](src·scale + shift)` per channel.
-    fn affine(src: &[f32], scale: &[f32], shift: &[f32], silu_out: bool, dst: &mut [f32]) {
+    pub(crate) fn apply_affine(src: &[f32], scale: &[f32], shift: &[f32], silu_out: bool, dst: &mut [f32]) {
         let c = scale.len();
         for (d, s) in dst.chunks_exact_mut(c).zip(src.chunks_exact(c)) {
             if silu_out {

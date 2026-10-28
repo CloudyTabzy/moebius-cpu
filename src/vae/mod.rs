@@ -14,8 +14,10 @@
 //!
 //! Encoding takes the posterior *sample* (`latent_dist.sample()`, as
 //! upstream) scaled by `scaling_factor`; decoding divides by it first.
-//! Peak activation memory is the decoder's last level (512² × 128 f32 =
-//! 128 MB per tensor, four live in `Work`).
+//! Peak activation memory is the decoder's last levels: three live feature maps in
+//! `Work` (up to 512² × 256 f32 = 268 MB for the upsample conv output). GroupNorm+SiLU
+//! is never materialised: `GroupNorm::affine` gives per-channel scale/shift and the
+//! Winograd convs apply them while gathering their input (`Conv3x3::forward_prologue`).
 //!
 //! Names follow diffusers' `AutoencoderKL`; the loader is positioned at the
 //! file root (prefix `""`). This module holds the pieces both halves share:
@@ -82,33 +84,32 @@ impl Vae {
     }
 }
 
-/// Four activation buffers reused by every layer: the hidden state `cur`, its
-/// successor `next`, and two scratch tensors for resnet internals. Layers write
-/// into `next` and swap, so no feature map is copied.
+/// Three activation buffers reused by every layer: the hidden state `cur`, its
+/// successor `next`, and one scratch tensor `h` for the resnet's inner feature map.
+/// Layers write into `next` and swap, so no feature map is copied. GroupNorm+SiLU is
+/// never materialised: it is fused into the input gather of the 3x3 convs.
 pub(crate) struct Work {
     pub cur: Tensor,
     pub next: Tensor,
-    a: Tensor,
-    b: Tensor,
+    h: Tensor,
 }
 
 impl Work {
-    /// Takes four buffers of `len` elements (the largest feature map to come) from
+    /// Takes three buffers of `len` elements (the largest feature map to come) from
     /// the scratch pool; give them back with [`Work::release`].
     pub fn new(s: &mut Scratch, len: usize) -> Self {
-        Self { cur: s.tensor_for(len), next: s.tensor_for(len), a: s.tensor_for(len), b: s.tensor_for(len) }
+        Self { cur: s.tensor_for(len), next: s.tensor_for(len), h: s.tensor_for(len) }
     }
 
     /// Returns the buffers to the pool, except `cur`, which is handed to the caller.
     pub fn release(self, s: &mut Scratch) -> Tensor {
         s.recycle(self.next);
-        s.recycle(self.a);
-        s.recycle(self.b);
+        s.recycle(self.h);
         self.cur
     }
 
     pub fn resnet(&mut self, r: &Resnet, s: &mut Scratch) {
-        r.forward(&self.cur, &mut self.next, &mut self.a, &mut self.b, s);
+        r.forward(&self.cur, &mut self.next, &mut self.h, s);
         std::mem::swap(&mut self.cur, &mut self.next);
     }
 
@@ -119,8 +120,8 @@ impl Work {
 
     /// `cur = conv(SiLU(GN(cur)))`.
     pub fn norm_silu_conv(&mut self, norm: &GroupNorm, conv: &Conv3x3, s: &mut Scratch) {
-        norm.forward(&self.cur, None, true, &mut self.a);
-        conv.forward(&self.a, &mut self.next, s);
+        let aff = norm.affine(&self.cur, None, true);
+        conv.forward_prologue(&self.cur, Some(&aff), &mut self.next, s);
         std::mem::swap(&mut self.cur, &mut self.next);
     }
 
@@ -154,17 +155,19 @@ impl Resnet {
         })
     }
 
-    /// `out` is reshaped to `[n, h, w, c_out]`; `x`, `out`, `a`, `b` are distinct tensors.
-    pub fn forward(&self, x: &Tensor, out: &mut Tensor, a: &mut Tensor, b: &mut Tensor, s: &mut Scratch) {
-        self.norm1.forward(x, None, true, a);
-        self.conv1.forward(a, b, s);
-        self.norm2.forward(b, None, true, a);
-        self.conv2.forward(a, out, s);
+    /// `out` is reshaped to `[n, h, w, c_out]`; `x`, `out`, `h` are distinct tensors
+    /// (`h` is scratch). The GroupNorms are fused into the convs' input gathers, so
+    /// only these three feature maps are live.
+    pub fn forward(&self, x: &Tensor, out: &mut Tensor, h: &mut Tensor, s: &mut Scratch) {
+        let aff = self.norm1.affine(x, None, true);
+        self.conv1.forward_prologue(x, Some(&aff), h, s);
+        let aff = self.norm2.affine(h, None, true);
+        self.conv2.forward_prologue(h, Some(&aff), out, s);
         match &self.shortcut {
             Some(sc) => {
-                // b = shortcut(x) + out, then b takes out's place.
-                sc.forward(x, b, Some(out), s);
-                std::mem::swap(out, b);
+                // h = shortcut(x) + out, then h takes out's place.
+                sc.forward(x, h, Some(out), s);
+                std::mem::swap(out, h);
             }
             None => add_inplace(&mut out.data, &x.data),
         }

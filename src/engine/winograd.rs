@@ -15,6 +15,11 @@
 //! * kernel `U`: `[c_out_block][16][c_in]`, transformed once per call when it
 //!   fits `U_BUDGET`, otherwise per output-channel block (UNet 1280 conv).
 //!
+//! With a GroupNorm prologue (`Affine`) each band first normalises just the
+//! input rows it needs (its tile rows plus a one-row halo) into a strip, and
+//! the tiles are gathered from the strip, so the normalised tensor is never
+//! materialised and each value is normalised about once, not once per tap.
+//!
 //! The 16 GEMMs run concurrently, single-threaded each: measured 506–680
 //! GFLOPS on Moebius shapes vs 340–505 running them one after another with
 //! internal parallelism (`examples/wino_probe.rs`).
@@ -25,18 +30,24 @@ use half::slice::HalfFloatSliceExt;
 use rayon::prelude::*;
 
 use super::gemm::{MatRef, matmul};
+use super::norm::{Affine, apply_affine};
 use super::simd::multiversion;
 use super::{Param, Scratch, Tensor};
 
 /// Floats for the `V` band (16 MB).
 const V_BUDGET: usize = 4 << 20;
+/// Pixels per task when normalising a strip.
+const STRIP_PIXELS: usize = 64;
 /// Floats for the transformed kernel block (32 MB).
 const U_BUDGET: usize = 8 << 20;
 
 /// `out = conv3x3(x [nearest-2× upsampled], pad 1) + bias`.
-/// `weight`: `[c_out, 3, 3, c_in]`.
+/// `weight`: `[c_out, 3, 3, c_in]`. With `prologue`, the input is read as
+/// `[SiLU](x·scale + shift)` (per item and channel); padding stays zero.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn conv3x3_same(
     x: &Tensor,
+    prologue: Option<&Affine>,
     upsample2x: bool,
     weight: &Param,
     bias: Option<&[f32]>,
@@ -45,6 +56,9 @@ pub(crate) fn conv3x3_same(
     s: &mut Scratch,
 ) {
     let ci = x.c;
+    if let Some(p) = prologue {
+        assert_eq!((p.scale.len(), p.shift.len()), (x.n * ci, x.n * ci), "Winograd prologue size");
+    }
     let shift = usize::from(upsample2x);
     let (hi, wi) = (x.h << shift, x.w << shift);
     out.set_shape(x.n, hi, wi, c_out);
@@ -70,10 +84,17 @@ pub(crate) fn conv3x3_same(
     if oblk == c_out {
         transform_kernel(weight, ci, 0..c_out, &mut s.wino_u);
     }
-    let geo = Geo { x, shift, hi, wi, th, tw };
 
     for t0 in (0..tiles).step_by(band) {
         let mb = band.min(tiles - t0);
+        let (data, row_base) = match prologue {
+            Some(p) => {
+                let base = fill_strip(x, shift, th, tw, t0, mb, p, &mut s.wino_strip);
+                (&s.wino_strip[..], base)
+            }
+            None => (&x.data[..], (0..x.n).map(|b| b * x.h).collect()),
+        };
+        let geo = Geo { x, data, row_base, shift, hi, wi, th, tw };
         let v = &mut s.wino_v[..16 * mb * ci];
         v.par_chunks_mut(16 * ci).with_min_len(8).enumerate().for_each(|(i, vt)| {
             let rows = geo.input_tile(t0 + i, &zeros);
@@ -104,8 +125,13 @@ fn grow(v: &mut Vec<f32>, len: usize) {
     }
 }
 
+/// Gather geometry of one band. `data` holds NHWC rows of source width `x.w`; the
+/// row of source row `sy` of item `b` is `row_base[b] + sy` (the tensor itself,
+/// or the normalised strip of the band's rows).
 struct Geo<'a> {
     x: &'a Tensor,
+    data: &'a [f32],
+    row_base: Vec<usize>,
     shift: usize,
     hi: usize,
     wi: usize,
@@ -124,8 +150,9 @@ impl Geo<'_> {
             let iy = (2 * ty + k / 4).wrapping_sub(1);
             let ix = (2 * tx + k % 4).wrapping_sub(1);
             if iy < self.hi && ix < self.wi {
-                let p = ((b * x.h + (iy >> self.shift)) * x.w + (ix >> self.shift)) * c;
-                &x.data[p..p + c]
+                let row = self.row_base[b].wrapping_add(iy >> self.shift);
+                let p = (row * x.w + (ix >> self.shift)) * c;
+                &self.data[p..p + c]
             } else {
                 zeros
             }
@@ -173,6 +200,54 @@ impl Geo<'_> {
                 );
         }
     }
+}
+
+/// Normalises the input rows band `t0..t0+mb` (whole tile rows) reads, i.e. its tile
+/// rows plus one halo row each side, into `strip` (`+ SiLU`, as `apply_affine`).
+/// Returns, per item, the base such that source row `sy` of that item is strip row
+/// `base + sy` (items outside the band get 0).
+#[allow(clippy::too_many_arguments)]
+fn fill_strip(
+    x: &Tensor,
+    shift: usize,
+    th: usize,
+    tw: usize,
+    t0: usize,
+    mb: usize,
+    p: &Affine,
+    strip: &mut Vec<f32>,
+) -> Vec<usize> {
+    let (c, w) = (x.c, x.w);
+    let hi = x.h << shift;
+    let (r0, r1) = (t0 / tw, (t0 + mb) / tw);
+    let mut base = vec![0usize; x.n];
+    // (item, first source row, rows, first strip row)
+    let mut segs = Vec::new();
+    let mut off = 0usize;
+    for (b, base_b) in base.iter_mut().enumerate() {
+        let (lo, up) = (r0.max(b * th), r1.min((b + 1) * th));
+        if lo >= up {
+            continue;
+        }
+        let (lo, up) = (lo - b * th, up - b * th);
+        // Tile row ty reads upsampled rows 2ty-1..=2ty+2; clamp to the image.
+        let y0 = (2 * lo).saturating_sub(1) >> shift;
+        let y1 = (2 * up).min(hi - 1) >> shift;
+        *base_b = off.wrapping_sub(y0);
+        segs.push((b, y0, y1 - y0 + 1, off));
+        off += y1 - y0 + 1;
+    }
+    grow(strip, off * w * c);
+    for (b, y0, rows, off) in segs {
+        let len = rows * w * c;
+        let dst = &mut strip[off * w * c..][..len];
+        let src = &x.data[(b * x.h + y0) * w * c..][..len];
+        let (scale, sh) = (&p.scale[b * c..(b + 1) * c], &p.shift[b * c..(b + 1) * c]);
+        dst.par_chunks_mut(STRIP_PIXELS * c)
+            .zip(src.par_chunks(STRIP_PIXELS * c))
+            .for_each(|(d, s)| apply_affine(s, scale, sh, p.silu, d));
+    }
+    base
 }
 
 /// `U = G g Gᵀ` for output channels `oc`, layout `[o][16][c_in]`.

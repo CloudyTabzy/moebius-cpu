@@ -211,3 +211,55 @@ fn depthwise_register_blocks_and_tails() {
         assert_close(&out, &want, 1e-5);
     }
 }
+
+fn lcg(seed: u64) -> impl FnMut() -> f32 {
+    let mut s = seed;
+    move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    }
+}
+
+fn rel_l2(got: &Tensor, want: &Tensor) -> f64 {
+    assert_eq!(got.shape(), want.shape(), "shape");
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (g, w) in got.data.iter().zip(&want.data) {
+        num += (*g as f64 - *w as f64).powi(2);
+        den += (*w as f64).powi(2);
+    }
+    (num / den).sqrt()
+}
+
+#[test]
+fn winograd_prologue_matches_group_norm_then_conv() {
+    // GN(+SiLU) fused into the Winograd input gather: odd sizes, borders (padding
+    // stays zero, not f(0)), upsampled and plain, and a multi-band case whose second
+    // band starts inside batch item 0 and ends in item 1.
+    let cases = [(2, 7, 9, 40, 8, 24), (2, 37, 23, 768, 32, 16)];
+    for (n, h, w, ci, groups, co) in cases {
+        for up in [false, true] {
+            let mut rnd = lcg(7 + ci as u64);
+            let x = Tensor::from_vec((0..n * h * w * ci).map(|_| rnd() * 3.0 + 0.7).collect(), n, h, w, ci);
+            let gn = GroupNorm {
+                groups,
+                eps: 1e-6,
+                gamma: (0..ci).map(|_| 1.0 + 0.5 * rnd()).collect(),
+                beta: (0..ci).map(|_| rnd()).collect(),
+            };
+            let wt: Vec<f32> = (0..co * 9 * ci).map(|_| rnd() * 0.05).collect();
+            let bias: Vec<f32> = (0..co).map(|i| i as f32 * 0.01).collect();
+            let mut conv = Conv3x3::same(ci, co, Param::f16_from(&wt), Some(bias));
+            conv.upsample2x = up;
+            let mut s = Scratch::default();
+
+            let (mut a, mut want, mut got) = (Tensor::default(), Tensor::default(), Tensor::default());
+            gn.forward(&x, None, true, &mut a);
+            conv.forward(&a, &mut want, &mut s);
+            let aff = gn.affine(&x, None, true);
+            conv.forward_prologue(&x, Some(&aff), &mut got, &mut s);
+            let err = rel_l2(&got, &want);
+            assert!(err <= 1e-6, "n={n} h={h} w={w} c={ci} up={up}: rel_l2 {err:e}");
+            println!("prologue n={n} h={h} w={w} c={ci} up={up}: rel_l2 {err:e}");
+        }
+    }
+}

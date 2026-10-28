@@ -17,6 +17,7 @@
 use rayon::prelude::*;
 
 use super::gemm::{MatRef, matmul};
+use super::norm::Affine;
 use super::{Param, Scratch, Tensor, threads};
 
 /// Patch-matrix budget in floats (32 MB). Bands are ≤ 4096 pixels, and fewer
@@ -80,11 +81,22 @@ impl Conv3x3 {
     }
 
     pub fn forward(&self, x: &Tensor, out: &mut Tensor, s: &mut Scratch) {
+        self.forward_prologue(x, None, out, s);
+    }
+
+    /// `out = conv(f(x))` where `f` is the GroupNorm affine (+ SiLU) described by
+    /// `prologue`, applied on the fly to every in-image input value: zero padding
+    /// stays zero. Bit-identical to `GroupNorm::forward` followed by [`forward`](Self::forward)
+    /// without ever materialising the normalised tensor. Winograd (stride 1 / pad 1)
+    /// convs only; the strided path asserts `prologue.is_none()`.
+    pub fn forward_prologue(&self, x: &Tensor, prologue: Option<&Affine>, out: &mut Tensor, s: &mut Scratch) {
         assert_eq!(x.c, self.c_in, "Conv3x3 input channels");
         assert_eq!(self.weight.len(), 9 * self.c_in * self.c_out, "Conv3x3 weight size");
         if self.stride == 1 && self.pad == [1; 4] {
-            super::winograd::conv3x3_same(x, self.upsample2x, &self.weight, self.bias.as_deref(), self.c_out, out, s);
+            let bias = self.bias.as_deref();
+            super::winograd::conv3x3_same(x, prologue, self.upsample2x, &self.weight, bias, self.c_out, out, s);
         } else {
+            assert!(prologue.is_none(), "Conv3x3 prologue needs the stride-1 / pad-1 Winograd path");
             self.forward_im2col(x, out, s);
         }
     }
