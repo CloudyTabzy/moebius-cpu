@@ -315,3 +315,107 @@ fn blocks_timing() {
         println!("{name} 2x64x64x320: {:.1} ms/forward", t0.elapsed().as_secs_f64() * 200.0);
     }
 }
+
+// ---- Task 5: UNet assembly and embeddings ----
+
+use moebius_cpu::unet::embed::timestep_sinusoid;
+use moebius_cpu::unet::{Guidance, UNet};
+
+#[test]
+fn sinusoid_matches_diffusers() {
+    let mut out = [0.0f32; 320];
+    timestep_sinusoid(900, &mut out);
+    // Computed in f32 like torch (golden parity); the f32 rounding of arg = t·freq (up to 900 rad)
+    // costs a few 1e-6 against the f64 formula, hence 1e-5 rather than 1e-6.
+    for idx in [0usize, 1, 159, 160, 319] {
+        let i = (idx % 160) as f64;
+        let arg = 900.0 * (-(10000.0f64).ln() * i / 160.0).exp();
+        let want = if idx < 160 { arg.cos() } else { arg.sin() };
+        assert!((out[idx] as f64 - want).abs() <= 1e-5, "index {idx}: {} vs {want}", out[idx]);
+    }
+}
+
+/// Runs `forward_traced` on item 0 of `unet.in` (t = 900, Cfg); prints and returns
+/// `(name, rel_l2)` for every emitted tensor that exists in golden case 0, plus `unet.out`.
+fn unet_trace(dtype: &str) -> Vec<(String, f64)> {
+    let (m, g) = (model(dtype), golden(0));
+    let unet = UNet::load(&m).unwrap();
+    let full = tensor(&g, "unet.in");
+    let x = Tensor::from_vec(full.item(0).to_vec(), 1, full.h, full.w, full.c);
+    let mut s = Scratch::default();
+    let mut rows: Vec<(String, f64)> = Vec::new();
+    let out = unet.forward_traced(&x, 900, Guidance::Cfg, &mut s, &mut |name, t| {
+        if let Some(sh) = g.shape(name) {
+            let want = g.get_f32(name, sh).unwrap();
+            assert_eq!(t.data.len(), want.len(), "{name}: size {:?} vs golden {sh:?}", t.shape());
+            if name != "unet.temb" {
+                assert_eq!(t.shape().to_vec(), sh.to_vec(), "{name}: shape");
+            }
+            rows.push((name.to_string(), rel_l2(&t.data, &want)));
+        }
+    });
+    let want = tensor(&g, "unet.out");
+    assert_eq!(out.shape(), want.shape());
+    assert_eq!(rows.last().map(|r| r.0.as_str()), Some("unet.out"));
+    println!("{:<22} rel_l2 ({dtype})", "name");
+    for (n, e) in &rows {
+        println!("{n:<22} {e:.3e}");
+    }
+    rows
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn unet_trace_matches_pytorch_f32() {
+    let rows = unet_trace("f32");
+    assert_eq!(rows.len(), 39, "only {} golden tensors were compared", rows.len());
+    for (n, e) in &rows {
+        let tol = if n == "unet.out" { 1e-3 } else { 1e-4 };
+        assert!(*e <= tol, "{n}: rel_l2 {e:e} > {tol:e}");
+    }
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn unet_matches_pytorch_f16() {
+    let rows = unet_trace("f16");
+    let (n, e) = rows.last().unwrap();
+    assert_eq!(n, "unet.out");
+    assert!(*e <= 5e-3, "unet.out rel_l2 {e:e}");
+}
+
+#[test]
+#[ignore = "needs weights/ and weights/golden/"]
+fn unet_cond_only_matches_cfg_cond_half() {
+    let (m, g) = (model("f32"), golden(0));
+    let unet = UNet::load(&m).unwrap();
+    let full = tensor(&g, "unet.in");
+    let x = Tensor::from_vec(full.item(0).to_vec(), 1, full.h, full.w, full.c);
+    let mut s = Scratch::default();
+    let one = unet.forward(&x, 900, Guidance::CondOnly, &mut s);
+    assert_eq!(one.shape(), [1, 64, 64, 4]);
+    let want = tensor(&g, "unet.out");
+    let err = rel_l2(&one.data, want.item(1));
+    println!("cond-only vs golden cond half: rel_l2 = {err:.3e}");
+    assert!(err <= 1e-3, "rel_l2 {err:e}");
+}
+
+#[test]
+#[ignore = "timing probe; run with --nocapture"]
+fn unet_forward_timing() {
+    let (m, g) = (model("f16"), golden(0));
+    let unet = UNet::load(&m).unwrap();
+    let full = tensor(&g, "unet.in");
+    let x = Tensor::from_vec(full.item(0).to_vec(), 1, full.h, full.w, full.c);
+    let mut s = Scratch::default();
+    unet.forward(&x, 900, Guidance::Cfg, &mut s);
+    let mut times: Vec<f64> = (0..3)
+        .map(|_| {
+            let t0 = Instant::now();
+            unet.forward(&x, 900, Guidance::Cfg, &mut s);
+            t0.elapsed().as_secs_f64()
+        })
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("unet forward Cfg b=2 f16: median {:.2} s (runs {times:.2?})", times[1]);
+}
