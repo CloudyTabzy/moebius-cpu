@@ -35,7 +35,8 @@ From `Moebius/` source, `moebius.yaml`, and the meta-device model (`tools/count_
   Upstream's resize-to-multiple-of-64 path would crash on non-square input.
 - **Conditioning is constant.** `Embedding(20, 3072)` ids `10..20` (uncond) and `0..10`
   (cond) → `text_proj` 3072→768. Batch order is `[uncond, cond]`.
-- **VAE**: SD `AutoencoderKL` f8d4, 83.7 M params, scaling 0.18215 (checked at conversion).
+- **VAE**: `AutoencoderKL` f8d4 with SDXL-VAE weights (`hustvl/PixelHacker/vae`), 83.7 M params
+  shipped in fp16, **scaling_factor 0.13025** (the SDXL value, not SD-1.x's 0.18215). Computed in f32.
 - **Sampling**: DDIM, scaled_linear β 0.00085→0.012, `steps_offset=0`, final ᾱ = 1.
   20 steps at strength 0.99 run **19** steps from t=900, starting from
   `add_noise(z_image, noise, 900)` (ᾱ₉₀₀ = 0.0142, so 11.9% of the image signal), not pure noise.
@@ -213,11 +214,14 @@ UNet checkpoint SHA-256 (HF LFS oids, 2026-10-28). The converter records the has
 | Variant | SHA-256 | Local |
 |---|---|---|
 | `pretrained` | `6c9ee08ce467af48767b74416646d82f8a0c1dcfb558c478e635cef0ca8b2ad2` | |
-| `ft_places2` | `6525afb888e55f9b5c74fa0a5d19ca0762d720d6c716fb0f8422fbeb6868a09a` | |
+| `ft_places2` | `6525afb888e55f9b5c74fa0a5d19ca0762d720d6c716fb0f8422fbeb6868a09a` | ✅ validated: 1,203 tensors match the manifest (default for the plugin) |
 | `ft_celebahq` | `9d26630d91cf9748ed43541669197cf5d63fbb28793d0c1c5dc7c07028ad9045` | |
 | `ft_ffhq` | `ddd5b81b3034dea2bb380c574517ebbf24957903d99319fa8bbb8e69ca9d5606` | ✅ validated: 1,203 tensors match the manifest |
 
-f16 check on `ft_ffhq`: only one tensor exceeds the f16 range,
+VAE `diffusion_pytorch_model.bin` (fp16): `a59d7ea697f2942d22002dc3469e8c53db807a6b78f7f5ec03bd4c1f70f98efe`.
+✅ Validated: 248 tensors match the manifest. f16 storage is lossless.
+
+f16 check on `ft_ffhq` and `ft_places2`: only one tensor exceeds the f16 range,
 `down_blocks.0…attn2.norm_v.running_var` (9.9e4), a BatchNorm statistic that is folded away.
 
 ## 9. Verification

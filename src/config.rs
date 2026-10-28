@@ -49,8 +49,10 @@ pub const LAYER_NORM_EPS: f32 = 1e-5;
 /// diffusers `AutoencoderKL` GroupNorms.
 pub const VAE_EPS: f32 = 1e-6;
 
-/// SD-VAE (`sdvae_f8d4`): block_out_channels (128, 256, 512, 512), 2 layers.
+/// PixelHacker VAE (`sdvae_f8d4`, SDXL-VAE weights): block_out_channels
+/// (128, 256, 512, 512), 2 layers. Shipped in fp16, so f16 storage is exact.
 pub const VAE_BLOCK_OUT_CHANNELS: [usize; 4] = [128, 256, 512, 512];
-/// Read from `vae/config.json` by the converter and stored in the
-/// safetensors metadata; this is the SD-1.x value the converter checks against.
-pub const VAE_SCALING_FACTOR: f32 = 0.18215;
+/// From `hustvl/PixelHacker/vae/config.json`: the SDXL value, not SD-1.x's
+/// 0.18215. The converter stores the config's value in the safetensors
+/// metadata and the loader checks it against this constant.
+pub const VAE_SCALING_FACTOR: f32 = 0.13025;

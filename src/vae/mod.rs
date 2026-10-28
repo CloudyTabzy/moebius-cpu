@@ -1,4 +1,6 @@
-//! SD `AutoencoderKL` (`sdvae_f8d4`, the PixelHacker VAE) (M6).
+//! `AutoencoderKL` with SDXL-VAE weights (`sdvae_f8d4`, the PixelHacker VAE) (M6).
+//! The SDXL VAE overflows fp16 *activations* (diffusers' `force_upcast`);
+//! this engine computes in f32 throughout, so only the weights are f16.
 //!
 //! Hand-written on the engine kernels: block_out (128, 256, 512, 512),
 //! 2 resnets per level, one single-head attention in each mid block,
