@@ -16,7 +16,6 @@
 //! (Upsample2D convs), 14% λ position conv (→ ~3% after the fold in
 //! `lambda.rs`), 1% stride-2, 0.5% depthwise (`tools/count_flops.py`).
 //!
-//! Batch layout: item 0 = unconditional, item 1 = conditional, as upstream.
 //! Skip stack: the `conv_in` output, then every (resnet, transformer) output
 //! of the down blocks and every downsampler output (9 entries); each up
 //! resnet pops one and concatenates it after the hidden state (`[h ‖ skip]`).

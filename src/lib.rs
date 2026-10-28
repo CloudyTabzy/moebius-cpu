@@ -7,10 +7,9 @@
 //! See `docs/PLAN.md` for the design, the measured compute budget and the
 //! speed promise.
 //!
-//! Status: the compute kernels, `unet`, `vae`, `scheduler`, `imaging`,
-//! the end-to-end `pipeline` (Exact preset, verified against PyTorch with
-//! `examples/parity.rs`) and the C ABI are implemented. Fast-preset ROI
-//! decode and paste compensation are still M8.
+//! Status: runs end to end and matches upstream PyTorch (`tests/parity.rs`,
+//! `examples/parity.rs`). Still open: the Fast preset's ROI decode and
+//! colour compensation (M8), and the GIMP plugin hookup (M9).
 
 pub mod config;
 pub mod engine;

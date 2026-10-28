@@ -1,6 +1,6 @@
 # moebius-cpu: Design and Results
 
-*Status: M0 and M2 complete (engine kernels parity-tested and benchmarked) · Date: 2026-10-28*
+*Status: M0–M7 complete: Moebius runs end to end in pure Rust, matching PyTorch (§5) · Date: 2026-10-29*
 
 ## 1. Goal
 
@@ -88,26 +88,50 @@ Benchmark CPU: **i7-13620H** (6P + 4E, 16 threads, AVX2, no AVX-512).
 The budget below uses **520 GFLOPS** for 1×1, **~850 effective** for stride-1 3×3, **150 GFLOPS**
 for the λ filter (M3, not yet built), and **0.10 s/step** for memory-bound ops.
 
-`tools/bench_torch_baseline.py` measures the full PyTorch pipeline; it needs ~3 GB free RAM
-and is still to run (the machine had 1.4 GB commit headroom during M0).
+**PyTorch baseline (measured):** the upstream pipeline on the i7-13620H (torch 2.11 CPU, f32)
+takes **62–69 s** per Exact inpaint (`tools/dump_golden.py` run, M1).
+
+### GEMM backend (measured, `gemm-bench/RESULTS.md`, outside the repo)
+
+Interleaved runs on Moebius's exact shapes. `private-gemm-x86` 0.1.22 (faer's current x86
+kernels) is **1.74×** `gemm` 0.19 on the single multi-threaded GEMMs: its scheduler balances
+the hybrid P/E cores, where `gemm`'s even split leaves the P-cores waiting. It is 0.94× on
+Winograd's 16 concurrent single-threaded GEMMs, so those stay on `gemm`. `gemmkit` 0.1.2
+scored 1.53× / 0.99×; its fused epilogue lacks SiLU. In an interleaved A/B on one UNet CFG
+step: 1.04 s vs 1.19–1.27 s. `MOEBIUS_GEMM=gemm` forces the old backend.
+
+### Sustained power
+
+`examples/sustained.rs`: under sustained load, GEMM throughput cycles between
+**~340 and ~600 GFLOPS** every ~20 s as the power limit engages, averaging ~480. Short
+benchmarks catch the burst phase; back-to-back inpaints settle into the sustained phase.
 
 ## 5. The speed promise
 
 All targets are for one 512² inpaint on the i7-13620H, wall clock
 from the `moebius_inpaint` call to return, with weights already loaded.
 
-| Mode | Target | Projection (after M2) | What it is |
+| Mode | Target | Measured (M7, 2026-10-29) | What it is |
 |---|---|---|---|
-| **Exact** | **≤ 36 s** (stretch ≤ 30 s) | 21.7 s UNet (19 × 1.14 s) + 6.0 s VAE + 0.3 s ≈ **28 s** | Same pipeline as upstream. Parity-gated against PyTorch. |
-| **Fast** | **≤ 12 s** (stretch ≤ 9 s) | **7.8–9.0 s** (by mask size) | Approximations below; quality-gated (§9). |
-| Peak RSS | ≤ 1.5 GB | ≈ 1.4 GB | f16 weights (~620 MB) + static activation plan + ≤ 130 MB kernel scratch |
-| Engine load | ≤ 1.5 s | mmap + constant precompute | |
+| **Exact** | **≤ 36 s** (stretch ≤ 30 s) | ✅ **24–25 s** from cool (stretch met); **34–38 s** under sustained back-to-back load (power-limited, see §4) | Same pipeline as upstream. Parity-gated against PyTorch. 2.5× faster than PyTorch's 62–69 s. |
+| **Fast** | **≤ 12 s** (stretch ≤ 9 s) | not yet (M8) | Approximations below; quality-gated (§9). |
+| Peak working set | ≤ 1.5 GB | ✅ **1.36–1.37 GiB (1.42–1.44 GB)** | f16 weights (~650 MB) + pooled activations + kernel scratch |
+| Engine load | ≤ 1.5 s | ✅ 0.31–0.36 s | mmap + constant precompute |
 
-The committed targets stay where M0 put them. M0 projected 35.9 s for Exact from GEMM speed
-alone. Winograd brings the projection to ~28 s, but the λ layers (M3) and the assembled
-UNet/VAE are not measured yet, so the margin stays in reserve until M7 measures end to end.
-UNet step = 1×1 0.76 s + Winograd 3×3 0.12 s + stride-2 0.02 s + λ 0.14 s + memory-bound 0.10 s.
-VAE = encode ~2.8 s (incl. stride-2 im2col) + decode ~3.0 s + norms ~0.2 s.
+The promise holds for a one-off inpaint, which is how GIMP uses it. Long back-to-back
+batches slow to ~34–38 s because of the sustained power limit, not the code.
+The Fast preset (M8) is the headroom for that case.
+
+How the measured number was reached (each step parity-neutral, verified against the golden set):
+
+| Step | Exact inpaint (cool) |
+|---|---|
+| First end-to-end run (M7) | 47–52 s |
+| Activation buffers recycled through `Scratch` (no per-call page zeroing) | 27.6–28.4 s |
+| Multi-threaded GEMMs on `private-gemm-x86` | ~1.04 s/UNet step (A/B) |
+| GroupNorm+SiLU fused into the Winograd input gather (VAE) | **24.0–25.1 s**, peak 1.63 → 1.37 GiB |
+
+Measured stage times (cool): UNet step 1.04–1.17 s, VAE encode (B=2) 2.8–3.2 s, decode 2.7–3.1 s.
 
 **Fast preset** (`src/preset.rs`; the values are starting points, M8 tunes them inside the 12 s budget):
 
@@ -128,8 +152,15 @@ If Fast cannot meet both its time and quality gates, we report back instead of s
 ### 6.1 Layout and memory
 - **NHWC f32** activations. A 1×1 conv over P pixels is exactly `[P×Cin]·[Cin×Cout]`,
   and channel-wise kernels stream contiguous vectors.
-- **Static memory plan.** Every shape is fixed (512² in, 64² latent), so all activation
-  and scratch buffers are allocated once at `Engine::load`. Zero allocations per step.
+- **Recycled activations.** Every shape is fixed (512² in, 64² latent). Each inpaint keeps one
+  `Scratch` whose pool hands out buffers by best fit (`tensor_for`, `vec_buf`) and takes them back
+  (`recycle`). Every role gets the same buffer each step, so after the first UNet step nothing
+  large is allocated, zeroed or page-faulted. Fresh per-call allocations cost ~20 s per inpaint
+  on Windows. The pool is released after the VAE encode, so encoder maps don't sit through
+  the denoising loop.
+- **No materialised GroupNorm before 3×3 convs (VAE).** `GroupNorm::affine` gives per-channel
+  scale/shift, and `Conv3x3::forward_prologue` applies them (+SiLU) while filling each Winograd band's
+  input strip. VAE resnets keep three live maps instead of five. Bit-identical to GN-then-conv.
 - **Weights f16** (`src/weights.rs`, `engine/param.rs`). They are read from the memory-mapped file
   into f16 `Param`s at load. Each GEMM weight is widened to f32 (F16C) into a reusable panel
   (≤33 MB, the 1280→6400 layer) right before its GEMM; the 1×1 numbers in §4 include this.
@@ -139,27 +170,26 @@ If Fast cannot meet both its time and quality gates, we report back instead of s
   band ≤32 MB, Winograd tiles / products / kernel ≤16 / 32 / 32 MB.
 
 ### 6.2 Kernels (`src/engine/`)
-| Kernel | Approach |
-|---|---|
-All kernels in this table except the λ filter are built and parity-tested against PyTorch
+All kernels below are built and parity-tested against PyTorch
 (`tests/kernels.rs`, fixtures from `tools/dump_kernel_fixtures.py`, scaled error ≤ 1e-5).
 
 | Kernel | Approach |
 |---|---|
-| GEMM | `gemm` crate (runtime AVX2/FMA/AVX-512 dispatch), `engine/gemm.rs` |
+| GEMM | `engine/gemm.rs`: multi-threaded calls → `private-gemm-x86` (AVX2+FMA kernel set), single-threaded (Winograd) → `gemm` (§4) |
 | 1×1 conv / linear | GEMM with bias / residual fused by pre-filling the output and accumulating (`engine/conv.rs`) |
-| 3×3 conv, stride 1 | **Winograd F(2×2,3×3)** (`engine/winograd.rs`): 2.25× fewer multiplies. Banded over whole tile rows; 16 GEMMs run concurrently, one thread each (`examples/wino_probe.rs`). Nearest-2× upsample is fused into the tile gather. |
+| 3×3 conv, stride 1 | **Winograd F(2×2,3×3)** (`engine/winograd.rs`): 2.25× fewer multiplies. Banded over whole tile rows; 16 GEMMs run concurrently, one thread each (`examples/wino_probe.rs`). Nearest-2× upsample and an optional GroupNorm+SiLU prologue are fused into the tile gather. |
 | 3×3 conv, stride 2 | Row-band implicit im2col (≤32 MB band) → GEMM. Never a full im2col. |
 | depthwise 3×3 | NHWC, 32-channel register blocks × 2 pixels; row strips per task; epilogue fused: ReLU (DWConv2d) or GLU·SiLU (MixFFN) |
 | GroupNorm | Per-channel vectorised stats → f64 per group; one apply pass with fused pre-norm add (resnet temb) and SiLU |
 | LayerNorm, SiLU, add | Row-chunked, vectorised |
 | exp / SiLU | Branch-free Cephes `exp` (≤3e-7 rel) so SiLU loops vectorise. libm `exp` would cost ~0.85 s/step |
 | ISA dispatch | `multiversion!`: every hot loop is compiled for AVX2+FMA and baseline, selected at runtime |
-| λ filter (M3) | Per-pixel 225-tap AXPY over the contiguous v-vector (§6.4) |
+| λ filter | Per-pixel 225-tap AXPY over the contiguous v-vector (§6.4); 18.8 ms self-λ / 7.2 ms cross-λ at 2×64²×320 |
 
 ### 6.3 Threading
 A dedicated rayon pool (not the host's global pool), one thread per physical core by default.
-GEMM parallelism goes through the same pool. Hybrid P/E cores: M7 measures 6 vs 10 threads.
+GEMM parallelism goes through the same pool. The hybrid P/E-core imbalance turned out to be a
+GEMM-scheduling problem, solved by `private-gemm-x86`'s scheduler (§4), not by thread pinning.
 
 ### 6.4 λ-layer algebra (details in `src/unet/lambda.rs`)
 - **Self-λ:** `A[h,δ,n] = Σ_k Q W` then `Yp = Σ_δ A·V[n+δ] + Σ_k Q·b`.
@@ -169,9 +199,9 @@ GEMM parallelism goes through the same pool. Hybrid P/E cores: M7 measures 6 vs 
   two-stage `B = Q·E`, `Yp = B·V` remain. Precomputing `λp = E·V` would cost ~0.8 GB, so it isn't done.
 
 ### 6.5 Exact-preserving savings
-- CFG halves are identical until the first cross-λ: `conv_in`, the first resnet and the first
-  self-λ run at batch 1.
-- The time embedding and all 15 resnet `time_emb_proj` outputs are computed once per step.
+- The time embedding is computed once per step and shared by both CFG halves.
+- Not yet done (small): the CFG halves are identical until the first cross-λ, so `conv_in`, the
+  first resnet and the first self-λ could run at batch 1 (~2% of a step).
 
 ## 7. Pipeline and plugin integration
 
@@ -197,8 +227,15 @@ Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.
 - f16 with an f32 fallback per tensor
 - metadata `format = moebius-cpu/1`
 
-Sources: HF `hustvl/Moebius` (`ft_places2` for general scenes; `ft_celebahq` / `ft_ffhq` for
-portraits) and `hustvl/PixelHacker/vae`. All Apache-2.0.
+Sources: HF `hustvl/Moebius` and `hustvl/PixelHacker/vae`. All Apache-2.0.
+
+**Pick the checkpoint by content.** It matters as much as the port does
+(`weights/demo/demo_sheet.png`). Upstream's README runs its face examples with `ft_celebahq`.
+- People and portraits: `ft_celebahq` or `ft_ffhq`. Removing glasses yields believable eyes,
+  and identity is kept.
+- Scenes and objects: `ft_places2`. On a face it invents distorted eyes, and with a whole face
+  masked it paints a room.
+- The plugin should let the user choose, defaulting to portrait or scene by context.
 
 Local layout (`weights/` is git-ignored), mirroring the HF repos:
 
@@ -214,8 +251,8 @@ UNet checkpoint SHA-256 (HF LFS oids, 2026-10-28). The converter records the has
 | Variant | SHA-256 | Local |
 |---|---|---|
 | `pretrained` | `6c9ee08ce467af48767b74416646d82f8a0c1dcfb558c478e635cef0ca8b2ad2` | |
-| `ft_places2` | `6525afb888e55f9b5c74fa0a5d19ca0762d720d6c716fb0f8422fbeb6868a09a` | ✅ validated: 1,203 tensors match the manifest (default for the plugin) |
-| `ft_celebahq` | `9d26630d91cf9748ed43541669197cf5d63fbb28793d0c1c5dc7c07028ad9045` | |
+| `ft_places2` | `6525afb888e55f9b5c74fa0a5d19ca0762d720d6c716fb0f8422fbeb6868a09a` | ✅ validated: 1,203 tensors match the manifest; golden set source |
+| `ft_celebahq` | `9d26630d91cf9748ed43541669197cf5d63fbb28793d0c1c5dc7c07028ad9045` | ✅ downloaded, hash verified, converted |
 | `ft_ffhq` | `ddd5b81b3034dea2bb380c574517ebbf24957903d99319fa8bbb8e69ca9d5606` | ✅ validated: 1,203 tensors match the manifest |
 
 VAE `diffusion_pytorch_model.bin` (fp16): `a59d7ea697f2942d22002dc3469e8c53db807a6b78f7f5ec03bd4c1f70f98efe`.
@@ -229,11 +266,21 @@ f16 check on `ft_ffhq` and `ft_places2`: only one tensor exceeds the f16 range,
 | Gate | Criterion |
 |---|---|
 | Kernels (M2) ✅ | PyTorch fixtures + naive f64 references. 1×1 ≥ 450 GFLOPS, 3×3 ≥ 420 GFLOPS. Memory-bound kernels: total ≤ 0.10 s per UNet step* |
-| Blocks (M3–M6) | Golden tensors from `tools/dump_golden.py` with fixed noise. Rel L2 ≤ 1e-4 with f32 weights, ≤ 2e-3 with f16 |
-| Exact e2e (M7) | Same noise as PyTorch: PSNR ≥ 45 dB (f32 weights) / ≥ 30 dB and LPIPS ≤ 0.02 (f16) inside the mask. ≤ 36 s. RSS ≤ 1.5 GB |
+| Blocks (M3–M6) ✅ | Golden tensors from `tools/dump_golden.py` with fixed noise. Rel L2 ≤ 1e-4 with f32 weights, ≤ 2e-3 with f16. Measured: f32 ≤ 4.7e-6 per block (39 UNet tensors), f16 ≤ 1.9e-3; VAE ≤ 2.9e-5 |
+| Exact e2e (M7) ✅ | Same noise as PyTorch: PSNR ≥ 45 dB (f32 weights) / ≥ 30 dB (f16), whole image (LPIPS dropped: package not installed). ≤ 36 s. RSS ≤ 1.5 GB. Measured below |
 | ROI decode (M8) | Same latents, ROI vs full decode: PSNR ≥ 40 dB inside the mask |
 | Fast preset (M8) | LPIPS-to-ground-truth ≤ 1.05 × Exact's on ≥ 100 image/mask pairs, plus visual review. ≤ 12 s |
 | Speed regressions | `examples/kernel_bench.rs` now; per-stage timings recorded per milestone |
+
+**End-to-end parity (M7, final code, `cargo run --release --example parity`)**: identical recorded noise, 8-bit output vs PyTorch.
+
+| Case | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| f16 PSNR (dB) | 56.39 | 58.90 | 53.42 | 61.90 | 59.86 | 49.55 | 58.29 | 60.77 |
+| f32 PSNR (dB) | 74.59 | 78.57 | | | | | | |
+
+f32 differences are 1 LSB at truncation boundaries. f16 shows small weight-rounding drift
+amplified over 19 steps; the worst pixel is in case 5.
 
 \* M0 set the depthwise gate as "≥ 3× PyTorch". Measurement showed the kernel is DRAM-bound
 (it saturates at 4–6 threads), so its speed reflects memory bandwidth, not code quality. It
@@ -245,13 +292,13 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | # | Deliverable | Gate |
 |---|---|---|
 | **M0** ✅ | Measurements, crate scaffold, scheduler, weights loader, crop, C ABI | 14 tests pass; `gemm` ≈ MKL |
-| M1 | Converter + golden dumps (download weights ~1.2 GB) | Manifest match; golden set written |
+| **M1** ✅ | Converter + golden dumps | Manifest match; golden set independently re-verified |
 | **M2** ✅ | conv1x1, Winograd 3×3 (+upsample), im2col strided 3×3, depthwise, GroupNorm, LayerNorm, SiLU | §9 kernel gates pass (§4 table) |
-| M3 | Self-λ and cross-λ (folded) | Golden parity; ≤ 0.15 s/step for all λ |
-| M4 | MixTransformer + MixFFN | Golden parity |
-| M5 | UNet + embeddings | Parity; ≤ 1.35 s/step at batch 2 |
-| M6 | VAE encoder / decoder | Parity; encode ≤ 4.8 s (B=2), decode ≤ 5.4 s |
-| M7 | Pipeline, resize, blend, CLI | Exact e2e gate (§9), ≤ 36 s |
+| **M3** ✅ | Self-λ and cross-λ (folded) | Golden parity (f32 ≤ 1.9e-6) |
+| **M4** ✅ | MixTransformer + MixFFN | Golden parity (f32 ≤ 9.4e-7) |
+| **M5** ✅ | UNet + embeddings | Parity; 1.04–1.17 s/step at batch 2 (cool) |
+| **M6** ✅ | VAE encoder / decoder | Parity; encode 2.8–3.2 s (B=2), decode 2.7–3.1 s |
+| **M7** ✅ | Pipeline, resize, blend (Pillow-exact), CLI | Exact e2e gate (§9); 24–25 s cool; 1.42 GB peak |
 | M8 | Fast preset tuning (+ eval tooling) | Fast gates (§9), ≤ 12 s |
 | M9 | Plugin hookup, packaging, cancel/progress UX | GIMP smoke test on benchmark CPU |
 
@@ -260,8 +307,8 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | Risk | Mitigation |
 |---|---|
 | f16 weights miss parity | Per-tensor f32 fallback in the converter; global f32 mode (+0.6 GB) |
-| CPU thermal throttling over 35 s | Gate on sustained runs (3 back-to-back), not best-of |
-| E-core stragglers in GEMM | Measure 6 vs 10 threads (M7); pin to P-core count if better |
+| Sustained power limit (measured: ~340–600 GFLOPS cycles) | Promise stated per single inpaint; sustained batches documented at 34–38 s; Fast preset (M8) for headroom |
+| E-core stragglers in GEMM | Resolved: `private-gemm-x86` balances P/E cores (§4) |
 | RAM pressure inside GIMP | f16 + mmap + static plan; RSS gate |
 | Fast quality gate fails | Re-tune steps / CFG cutoff / ROI margin within 12 s, or report back |
 | Exact needs to be faster | INT8 W8A8 1×1 GEMMs via AVX-VNNI (≈1.5–2× on 62% of UNet FLOPs), behind its own quality gate, after M9 |
@@ -270,7 +317,8 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 
 | Crate | Use |
 |---|---|
-| `gemm` 0.19 | All dense math |
+| `gemm` 0.19 | Single-threaded GEMMs (Winograd's 16 concurrent tile GEMMs) |
+| `private-gemm-x86` =0.1.22 | Multi-threaded GEMMs (pinned: a "private" crate without semver promises) |
 | `rayon` 1.11 | Engine thread pool |
 | `safetensors` 0.8, `memmap2` 0.9, `half` 2.7, `bytemuck` 1 | f16 weights, mmap, zero-copy views |
 | `fast_image_resize` 6.1 | Lanczos3 window ↔ 512² |
