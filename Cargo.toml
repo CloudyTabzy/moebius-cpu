@@ -32,6 +32,9 @@ cli = ["dep:image", "dep:clap"]
 [dependencies]
 # Compute: the GEMM microkernels candle itself uses (runtime AVX2/FMA/AVX-512 dispatch).
 gemm = "0.19"
+# Multi-threaded GEMMs: faer's current x86 kernels (1.74x gemm on our shapes,
+# gemm-bench/RESULTS.md). Pinned: a "private" crate with no semver promise.
+private-gemm-x86 = "=0.1.22"
 rayon = "1.11"
 # Weights: f16 safetensors, memory-mapped, widened to f32 per layer at GEMM time.
 safetensors = "0.8"
