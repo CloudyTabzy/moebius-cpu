@@ -7,12 +7,13 @@
 //! padded (edge-replicated) when the image itself is smaller than the
 //! window on that axis.
 //!
-//! A 512² image is the exception: it is the model input already and is used
-//! whole (upstream semantics; PIL skips same-size resizes).
-//!
 //! Size: the mask's long side plus 50% margin on each side (as the old
 //! plugin), but never smaller than 512 px when the image allows it, so small
-//! objects are inpainted at native resolution instead of being upscaled.
+//! objects are inpainted at native resolution instead of being upscaled, and
+//! never larger than the image's long side: margin that would only be padding
+//! is dropped. A square image therefore never gets padded, and a 512² image
+//! is always used whole, unresampled (upstream semantics; PIL skips
+//! same-size resizes).
 
 use super::Rect;
 use crate::config::IMAGE_SIZE;
@@ -28,13 +29,10 @@ pub struct CropPlan {
 
 impl CropPlan {
     pub fn new(mask_bbox: Rect, img_w: usize, img_h: usize) -> Self {
-        // An image that already is the model's 512² input is used whole, as
-        // upstream does (no resampling at all), however large the mask is.
-        if (img_w, img_h) == (IMAGE_SIZE, IMAGE_SIZE) {
-            return Self { x: 0, y: 0, side: IMAGE_SIZE };
-        }
         let long = mask_bbox.w.max(mask_bbox.h);
-        let side = (long + 2 * (long / 2)).max(IMAGE_SIZE.min(img_w.max(img_h)));
+        let img_long = img_w.max(img_h);
+        // The mask always fits: long ≤ img_long.
+        let side = (long + 2 * (long / 2)).max(IMAGE_SIZE.min(img_long)).min(img_long);
         Self {
             x: place(mask_bbox.x, mask_bbox.w, side, img_w),
             y: place(mask_bbox.y, mask_bbox.h, side, img_h),
@@ -85,6 +83,16 @@ mod tests {
         assert_eq!(CropPlan::new(r(100, 100, 300, 300), 512, 512), whole);
         assert_eq!(CropPlan::new(r(5, 5, 2, 2), 512, 512), whole);
         assert_eq!(whole.source_rect(512, 512), r(0, 0, 512, 512));
+    }
+
+    #[test]
+    fn window_never_exceeds_the_image_long_side() {
+        // 600 px mask + 50% margin would be 1200; an 800² image caps it, whole and unpadded.
+        assert_eq!(CropPlan::new(r(100, 100, 600, 600), 800, 800), CropPlan { x: 0, y: 0, side: 800 });
+        // Non-square: capped at the long side, padding only on the short axis.
+        let p = CropPlan::new(r(200, 50, 500, 300), 1000, 400);
+        assert_eq!((p.side, p.x), (1000, 0));
+        assert_eq!(p.source_rect(1000, 400), r(0, 0, 1000, 400));
     }
 
     #[test]
