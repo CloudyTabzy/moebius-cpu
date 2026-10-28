@@ -20,6 +20,10 @@ required-features = ["cli"]
 [[example]]
 name = "gemm_probe"
 
+[[example]]
+name = "profile"
+required-features = ["cli"]
+
 [features]
 default = []
 # Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
