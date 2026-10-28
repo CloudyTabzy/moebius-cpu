@@ -24,6 +24,7 @@
 pub mod blocks;
 pub mod embed;
 pub mod lambda;
+pub mod load;
 pub mod transformer;
 
 use crate::engine::Tensor;

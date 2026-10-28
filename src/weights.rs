@@ -73,6 +73,11 @@ impl Weights {
         self.metadata.get(key).map(String::as_str)
     }
 
+    /// Stored shape of a tensor, if present.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.tensors.get(name).map(|e| e.shape.as_slice())
+    }
+
     /// Tensor data, checked against the shape the model code expects.
     pub fn get(&self, name: &str, shape: &[usize]) -> Result<TensorData<'_>> {
         let e = self.tensors.get(name).ok_or_else(|| Error::Weights(format!("missing tensor {name}")))?;
