@@ -14,7 +14,13 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().unwrap_or_else(|| "weights/ft_places2".into()));
     let threads: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(10);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+    // Same thread setup as Engine::load (EcoQoS opt-out unless MOEBIUS_POWER_THROTTLING=allow).
+    moebius_cpu::engine::cpu::disable_power_throttling();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(|_| moebius_cpu::engine::cpu::disable_power_throttling())
+        .build()
+        .unwrap();
     let w = Weights::open(&dir.join("unet.safetensors")).unwrap();
     let unet = pool.install(|| UNet::load(&w).unwrap());
     let x = Tensor::from_vec((0..64 * 64 * 9).map(|i| ((i * 7919) % 1000) as f32 / 500.0 - 1.0).collect(), 1, 64, 64, 9);

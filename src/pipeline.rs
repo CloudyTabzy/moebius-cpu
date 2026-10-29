@@ -117,9 +117,11 @@ impl Engine {
     pub fn load(weights_dir: &Path, threads: usize) -> Result<Self> {
         crate::engine::cpu::require_avx2_fma()?;
         let threads = if threads == 0 { crate::engine::cpu::default_threads() } else { threads };
+        crate::engine::cpu::disable_power_throttling();
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("moebius-{i}"))
+            .start_handler(|_| crate::engine::cpu::disable_power_throttling())
             .build()
             .map_err(|e| Error::InvalidInput(format!("thread pool: {e}")))?;
         // Weight packing and constant precomputation are parallel work too.
