@@ -23,3 +23,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Second build tree for allocator A/B runs (tools/bench_alloc.py)
+target-*/
