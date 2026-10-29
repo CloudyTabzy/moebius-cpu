@@ -29,9 +29,13 @@ name = "eval"
 required-features = ["cli"]
 
 [features]
-default = ["rusty-alloc"]
-# Process allocator: rusty_alloc, a pure-Rust remake of mimalloc. Disable with
-# --no-default-features to fall back to the system allocator (A/B timing).
+default = []
+# Opt-in process allocator: rusty_alloc, a pure-Rust remake of mimalloc. Not the
+# default because it does not pay for itself here (tools/bench_alloc.py, 2026-10-29):
+# with its defaults it is ~1.5% faster but peaks at 1.99-2.37 GiB
+# (over the 1.5 GB gate, it never returns freed memory); with any purge_delay
+# (0 ms-10 s) it peaks like the system allocator (~1.39 GiB) and is 0-5% slower.
+# The engine's buffer pool already removed the allocation churn it would fix.
 rusty-alloc = ["dep:rusty_alloc-api"]
 # Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
 cli = ["dep:image", "dep:clap", "dep:serde_json"]

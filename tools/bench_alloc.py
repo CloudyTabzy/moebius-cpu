@@ -8,8 +8,8 @@ UNet step, and the process's peak working set (Windows `GetProcessMemoryInfo`).
     python tools/bench_alloc.py [--rounds 3] [--only sys,ra,...] [--dry-run]
 
 Needs two builds of the example (the script makes both):
-    target/release/examples/profile.exe       default features (rusty_alloc)
-    target-sys/release/examples/profile.exe   --no-default-features --features cli
+    target/release/examples/profile.exe       --features cli,rusty-alloc
+    target-sys/release/examples/profile.exe   --features cli (system allocator, the default)
 rusty_alloc options are passed as RUSTY_ALLOC_<NAME> environment variables,
 so no rebuild is needed per option. Results: weights/bench_alloc.json + a table.
 """
@@ -36,6 +36,8 @@ CONFIGS = {
     "ra_purge0":   (RA_EXE, {"RUSTY_ALLOC_PURGE_DELAY": "0"}, 0),
     "ra_purge100": (RA_EXE, {"RUSTY_ALLOC_PURGE_DELAY": "100"}, 0),
     "ra_purge1s":  (RA_EXE, {"RUSTY_ALLOC_PURGE_DELAY": "1000"}, 0),
+    "ra_purge5s":  (RA_EXE, {"RUSTY_ALLOC_PURGE_DELAY": "5000"}, 0),
+    "ra_purge10s": (RA_EXE, {"RUSTY_ALLOC_PURGE_DELAY": "10000"}, 0),
     "ra_reserve":  (RA_EXE, {"RUSTY_ALLOC_RESERVE_OS_MEMORY": str(2 * 1024 * 1024)}, 0),  # KiB
     "ra_t6":       (RA_EXE, {}, 6),
     "ra_t16":      (RA_EXE, {}, 16),
@@ -96,8 +98,8 @@ def main():
             exe, env, t = CONFIGS[n]
             print(n, exe, env, "threads", t or "physical")
         return
-    for cmd in (["cargo", "build", "--release", "--features", "cli", "--example", "profile"],
-                ["cargo", "build", "--release", "--no-default-features", "--features", "cli",
+    for cmd in (["cargo", "build", "--release", "--features", "cli,rusty-alloc", "--example", "profile"],
+                ["cargo", "build", "--release", "--features", "cli",
                  "--example", "profile", "--target-dir", "target-sys"]):
         subprocess.run(cmd, cwd=ROOT, check=True)
     results = {n: [] for n in names}
