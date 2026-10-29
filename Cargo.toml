@@ -29,7 +29,10 @@ name = "eval"
 required-features = ["cli"]
 
 [features]
-default = []
+default = ["rusty-alloc"]
+# Process allocator: rusty_alloc, a pure-Rust remake of mimalloc. Disable with
+# --no-default-features to fall back to the system allocator (A/B timing).
+rusty-alloc = ["dep:rusty_alloc-api"]
 # Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
 cli = ["dep:image", "dep:clap", "dep:serde_json"]
 
@@ -51,6 +54,10 @@ fast_image_resize = "6.1"
 rand = "0.10"
 rand_distr = "0.6"
 thiserror = "2"
+# >= 2.2.7: 2.2.1-2.2.4 do not build with MSVC + LTO + panic=unwind (our release
+# profile), 2.2.6 fixes a Windows access violation after a purge, 2.2.7 a Windows
+# hang at process exit in rayon programs (a plugin process is exactly that).
+rusty_alloc-api = { version = "2.2.7", optional = true }
 # Physical-core count for the default thread pool size.
 num_cpus = "1.17"
 

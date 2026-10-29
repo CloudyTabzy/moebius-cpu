@@ -129,6 +129,7 @@ pub unsafe extern "C" fn moebius_engine_create(
     let Ok(dir) = unsafe { CStr::from_ptr(weights_dir) }.to_str() else {
         return fail(MOEBIUS_ERR_INVALID_ARGUMENT, "weights_dir is not UTF-8");
     };
+    pin_module();
     guard(|| {
         let engine = Engine::load(Path::new(dir), threads as usize)?;
         // SAFETY: caller contract.
@@ -136,6 +137,31 @@ pub unsafe extern "C" fn moebius_engine_create(
         Ok(())
     })
 }
+
+/// Keeps this DLL loaded for the life of the process. The allocator's
+/// thread-exit callback sits in an FLS slot that is never freed, so unloading
+/// the DLL while other threads live would make their exit call into unmapped
+/// code. Pinning makes any later `FreeLibrary` by the host a no-op.
+#[cfg(all(windows, feature = "rusty-alloc"))]
+fn pin_module() {
+    use std::sync::Once;
+    static PIN: Once = Once::new();
+    PIN.call_once(|| {
+        const FROM_ADDRESS: u32 = 0x4;
+        const PIN_FLAG: u32 = 0x1;
+        unsafe extern "system" {
+            fn GetModuleHandleExW(flags: u32, module_name: *const u16, module: *mut *mut c_void) -> i32;
+        }
+        let mut module = std::ptr::null_mut();
+        // SAFETY: with FROM_ADDRESS the "name" is an address inside this module
+        // (this function); `module` is a valid out-pointer. Failure only means
+        // the DLL stays unpinned, which is the status quo.
+        unsafe { GetModuleHandleExW(FROM_ADDRESS | PIN_FLAG, pin_module as *const u16, &mut module) };
+    });
+}
+
+#[cfg(not(all(windows, feature = "rusty-alloc")))]
+fn pin_module() {}
 
 /// # Safety
 /// `engine` must come from `moebius_engine_create` and not be used again.

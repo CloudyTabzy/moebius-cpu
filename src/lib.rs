@@ -11,6 +11,14 @@
 //! `examples/parity.rs`). ROI decode and compensated paste are in; still
 //! open: the Fast preset's measured parameters (M8) and the GIMP plugin hookup (M9).
 
+/// Pure-Rust mimalloc remake as the allocator of every Rust allocation in this
+/// crate's artifacts (CLI, examples, tests and the plugin DLL). Its thread-exit
+/// hook lives in a never-freed FLS slot, so the DLL pins itself on first use
+/// (`ffi::pin_module`) and can never be unloaded under live threads.
+#[cfg(feature = "rusty-alloc")]
+#[global_allocator]
+static ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+
 pub mod config;
 pub mod engine;
 pub mod error;
