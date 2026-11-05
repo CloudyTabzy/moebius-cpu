@@ -10,28 +10,26 @@ The design, measurements and speed promise are in **[docs/PLAN.md](docs/PLAN.md)
 
 ## Status
 
-**Finished.** All milestones (M0–M9) are done: Moebius runs in GIMP on pure Rust and matches PyTorch.
-Given the same noise, the 8-bit output reaches 74.6–78.6 dB PSNR vs upstream with f32 weights
-and 49.6–61.9 dB with f16 (8 test pairs). Every block is checked against recorded PyTorch
-tensors (`tests/parity.rs`).
+**Finished.** Moebius runs in GIMP on pure Rust and matches PyTorch. Given the same noise, the 8-bit
+output reaches 74.6–78.6 dB PSNR vs upstream with f32 weights and 49.6–61.9 dB with f16 (8 test
+pairs). Every block is checked against recorded PyTorch tensors (`tests/parity.rs`).
 
 Known limits:
-- Tested on one CPU only, with Windows 11 and GIMP 3.2.6. The speed promise applies to that machine.
+- Tested only with Windows and GIMP 3.2.6.
 - The worker's exit on cancel is tested, but GIMP's cancel button has not been clicked by hand.
 - The installer needs converted weights, so there is no one-click package for other people.
 
-## Targets (i7-13620H, 512² window)
+## Speed
 
-| Mode | Committed | Measured | Notes |
-|---|---|---|---|
-| Exact | ≤ 36 s | **24–25 s** (~30 s median under sustained back-to-back load) | Upstream pipeline, parity-gated. PyTorch CPU: 62–69 s |
-| Fast | ≤ 12 s | **10.7–11.9 s** (~13 s sustained) | 9 DPM-Solver++ steps, partial CFG, region-only image encode. LPIPS within 1.04× of Exact on 120 pairs |
+| Mode | One 512² inpaint | Quality |
+|---|---|---|
+| Exact | 24–25 s | Matches PyTorch, which takes 62–69 s on the same CPU |
+| Fast | 10.7–11.9 s | LPIPS within 1.04× of Exact on 120 pairs |
 
-Peak working set 1.42–1.44 GB (≤ 1.5 GB). Engine load ~0.35 s. Requires x86-64 with AVX2 + FMA.
-Pure Rust: dense math on `private-gemm-x86` (multi-threaded) and `gemm` (Winograd tiles).
+Times vary by CPU. Back-to-back runs are slower, and GIMP
+adds 1–2 s per run. Peak memory is about 1.44 GB. Requires x86-64 with AVX2 + FMA.
 
-Inside GIMP add 1–2 s: the plugin loads the model and moves PNGs on every run (Fast 12–14 s,
-Exact 27 s). The ≤ 12 s promise does not cover that time.
+Hardware, method and full results: [docs/PLAN.md](docs/PLAN.md#4-measured-compute-budget) (§4 and §5).
 
 ## Use it in GIMP
 
@@ -74,7 +72,7 @@ cargo test
 cargo build --release                      # target/release/moebius_cpu.dll (+ .lib)
 cargo build --release --features cli       # moebius-cli: command line and GIMP plugin worker
 cargo run --release --example gemm_probe   # GEMM throughput
-cargo run --release --example kernel_bench # M2 kernel speed gates
+cargo run --release --example kernel_bench # kernel speed gates
 cargo run --release --features cli --example profile   # per-stage timing of one inpaint
 cargo run --release --features cli --example eval      # eval runs for Fast vs Exact (tools/eval)
 cargo run --release --example sustained   # GEMM throughput under sustained load
