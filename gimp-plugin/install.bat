@@ -141,6 +141,6 @@ exit /b 0
 
 REM Keeps the window open when the script was double-clicked.
 :pause_if_clicked
-echo %CMDCMDLINE% | "%SystemRoot%\System32ind.exe" /I "%SELF%" >nul
+echo %CMDCMDLINE% | "%SystemRoot%\System32\find.exe" /I "%SELF%" >nul
 if not errorlevel 1 pause
 exit /b 0
