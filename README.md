@@ -6,6 +6,8 @@
 project runs it in pure Rust, with no GPU, so it can work from inside an image editor. GIMP 3.2 is the
 first host. Other native hosts can use the DLL and its C ABI (`include/moebius_cpu.h`).
 
+**[Download for GIMP on Windows](https://github.com/CloudyTabzy/moebius-cpu/releases/latest/download/moebius-inpaint-gimp-windows.zip)**, then follow [Install](#install).
+
 The design, measurements and speed promise are in **[docs/PLAN.md](docs/PLAN.md)**.
 
 ## Status
@@ -33,8 +35,7 @@ Hardware, method and full results: [docs/PLAN.md](docs/PLAN.md#4-measured-comput
 ## Install
 
 1. Install [GIMP 3.2](https://www.gimp.org/downloads/) on Windows and open it once.
-2. Download `moebius-inpaint-gimp-windows.zip` from
-   [Releases](https://github.com/CloudyTabzy/moebius-cpu/releases) and unzip it.
+2. Download [moebius-inpaint-gimp-windows.zip](https://github.com/CloudyTabzy/moebius-cpu/releases/latest/download/moebius-inpaint-gimp-windows.zip) and unzip it.
 3. Double-click `install.bat`.
 
 It downloads about 2 GB of models from Hugging Face, checks them and sets everything up for your user,

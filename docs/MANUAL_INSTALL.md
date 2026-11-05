@@ -5,8 +5,7 @@ and about 3 GB of free disk.
 
 ## 1. Get the programs
 
-Download `moebius-inpaint-gimp-windows.zip` from
-[Releases](https://github.com/CloudyTabzy/moebius-cpu/releases) and unzip it.
+Download [moebius-inpaint-gimp-windows.zip](https://github.com/CloudyTabzy/moebius-cpu/releases/latest/download/moebius-inpaint-gimp-windows.zip) and unzip it.
 
 ## 2. Create the plugin folder
 
