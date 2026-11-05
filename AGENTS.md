@@ -20,6 +20,9 @@ The project is finished (M0–M9), so any work from here is maintenance.
 - GIMP's Python is MINGW and cannot load MSVC binaries: keep inference in `moebius-cli.exe`. Import
   only GIMP's own modules in `gimp-plugin/moebius-inpaint.py`.
 - `moebius-cli --plugin` exits when stdin closes, so a killed plugin leaves no process holding the exe.
+- Never host the models: `install.bat` downloads them from pinned upstream revisions and
+  `moebius-convert` checks their hashes. Release binaries come from CI, because a local build embeds
+  local paths.
 - Judge removals with selections that cover the whole object. A selection that cuts through an
   object leaves part of it behind, and Exact does the same.
 

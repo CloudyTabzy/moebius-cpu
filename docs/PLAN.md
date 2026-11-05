@@ -237,7 +237,9 @@ Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.
   the selection.
 - The worker prints `PROGRESS <stage> <done> <total>` for GIMP's progress bar. It exits with code 3
   when stdin closes, so a killed plugin leaves no process behind.
-- `install.bat` copies the plugin, worker and both checkpoints into the user's GIMP profile (~1.3 GB).
+- `install.bat` puts the plugin, the worker and both models into the user's GIMP profile. It downloads
+  from pinned Hugging Face revisions, so nothing large is hosted here, and resumes after a dropped
+  connection. `.github/workflows/release.yml` builds the zip for a `v*` tag.
 
 **C ABI** (`include/moebius_cpu.h`, `src/ffi.rs`, implemented and tested). It serves native hosts;
 the GIMP plugin does not use it:
@@ -247,7 +249,10 @@ the GIMP plugin does not use it:
 
 ## 8. Weights
 
-`tools/convert_weights.py` (M1, spec in its docstring):
+`moebius-convert` turns upstream checkpoints into the engine's format with no Python or torch: a
+small zip reader and a pickle reader that calls nothing but tensor rebuilds, then the steps below.
+It refuses files with the wrong hash. Tensors are bit-identical to `tools/convert_weights.py`, which
+remains the format reference (spec in its docstring):
 - strict name/shape check against `docs/weights-manifest.txt` (1,455 tensors)
 - BatchNorm folding
 - NHWC-friendly re-layout
@@ -332,8 +337,8 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | **M9** ✅ | `gimp-plugin/`: Python glue, `moebius-cli --plugin` worker, per-user installer, progress, orphan-safe cancel | §9 GIMP gate; Fast 12.0–13.6 s, Exact 27.0 s including load and PNG transfer |
 
 Closed 2026-11-05. Left open: the plugin has only been tested on the i7-13620H, GIMP's cancel button has not
-been clicked by hand (the worker's exit on a closed stdin is tested), and the installer needs
-converted weights, so there is no one-click package.
+been clicked by hand (the worker's exit on a closed stdin is tested), and the programs are not
+code-signed.
 
 ## 11. Risks
 
@@ -359,7 +364,7 @@ converted weights, so there is no one-click package.
 | `rand` 0.10, `rand_distr` 0.6 | Initial noise |
 | `num_cpus` 1.17 | Physical-core pool size |
 | `thiserror` 2 | Errors |
-| `image` 0.25, `clap` 4, `serde_json` 1 (feature `cli`) | `moebius-cli`, which is also the plugin worker; `serde_json` is for the eval runner |
+| `image` 0.25, `clap` 4, `serde_json` 1, `sha2` 0.10 (feature `cli`) | `moebius-cli`, which is also the plugin worker, and `moebius-convert` |
 | `rusty_alloc-api` 2.2.7 (feature `rusty-alloc`) | Opt-in allocator, off by default (§5) |
 
 Not used: `imageproc` (the σ=3 feather is a 20-line separable blur),

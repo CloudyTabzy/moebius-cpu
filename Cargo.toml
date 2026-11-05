@@ -17,6 +17,11 @@ name = "moebius-cli"
 path = "src/bin/moebius-cli.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "moebius-convert"
+path = "src/bin/moebius-convert.rs"
+required-features = ["cli"]
+
 [[example]]
 name = "gemm_probe"
 
@@ -38,7 +43,7 @@ default = []
 # The engine's buffer pool already removed the allocation churn it would fix.
 rusty-alloc = ["dep:rusty_alloc-api"]
 # moebius-cli: PNG in/out + argument parsing. It is also the GIMP plugin's worker.
-cli = ["dep:image", "dep:clap", "dep:serde_json"]
+cli = ["dep:image", "dep:clap", "dep:serde_json", "dep:sha2"]
 
 [dependencies]
 # Compute: the GEMM microkernels candle itself uses (runtime AVX2/FMA/AVX-512 dispatch).
@@ -69,6 +74,8 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 clap = { version = "4", features = ["derive"], optional = true }
 # Already in the tree via safetensors; the eval runner reads/writes the manifest and times.
 serde_json = { version = "1", optional = true }
+# Checks downloaded checkpoints in moebius-convert.
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # PNG masks in the ROI parity test (the CLI feature is not needed to run tests).

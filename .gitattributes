@@ -1,2 +1,3 @@
 # Never apply line-ending conversion to binary test fixtures.
 *.safetensors binary
+*.bat text eol=crlf
