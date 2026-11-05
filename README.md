@@ -44,6 +44,8 @@ and if you close it, running it again carries on.
 
 The programs are not code-signed yet, so Windows may warn you. Choose **More info**, then **Run anyway**.
 
+To do it by hand, with the links and folders to use, see [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md).
+
 ## Use it in GIMP
 
 Restart GIMP, select what to remove, then use **Filters > Enhance > Moebius Inpaint...**
