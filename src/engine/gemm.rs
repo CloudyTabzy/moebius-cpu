@@ -5,7 +5,7 @@
 //! contractions as batched calls. Activations are NHWC, so a 1x1 conv over
 //! `pixels` positions is exactly `[pixels × c_in] · [c_in × c_out]`.
 //!
-//! Backend choice is measured, not assumed (`gemm-bench/RESULTS.md`, Moebius
+//! Backend choice is measured, not assumed (`docs/PLAN.md` §4, Moebius
 //! shapes, interleaved runs across power states):
 //! * multi-threaded calls → `private-gemm-x86` (faer's current x86 kernels):
 //!   1.74× `gemm` 0.19 geomean on the 1x1 / linear / λ / attention shapes. Its

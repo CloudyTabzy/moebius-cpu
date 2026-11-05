@@ -5,15 +5,15 @@ The project is finished (M0–M9), so any work from here is maintenance.
 
 ## Privacy
 
-- Never send the user's email address, or any other personal detail, to an outside service: no
-  `User-Agent` strings, URLs, headers or payloads. Use a generic client name. A site asking automated
-  clients for contact details is not a reason to do it.
+- Never send an email address or any other personal detail to an outside service: no `User-Agent`
+  strings, URLs, headers or payloads. Use a generic client name. A site asking automated clients for
+  contact details is not a reason to do it.
 
 ## Project rules
 
 - Pure Rust, CPU only. No C libraries in the engine. Python is offline tooling only.
 - Exact preset results must not change: `cargo test --release --test parity -- --ignored --test-threads=1`.
-- Do not move a gate to pass it. Report the number, and let the user decide.
+- Do not move a gate to pass it. Report the number, and let the maintainer decide.
 
 ## GIMP plugin
 

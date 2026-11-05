@@ -92,7 +92,7 @@ the stage times measured since.
 **PyTorch baseline (measured):** the upstream pipeline on the i7-13620H (torch 2.11 CPU, f32)
 takes **62–69 s** per Exact inpaint (`tools/dump_golden.py` run, M1).
 
-### GEMM backend (measured, `gemm-bench/RESULTS.md`, outside the repo)
+### GEMM backend (measured)
 
 Interleaved runs on Moebius's exact shapes. `private-gemm-x86` 0.1.22 (faer's current x86
 kernels) is **1.74×** `gemm` 0.19 on the single multi-threaded GEMMs: its scheduler balances
@@ -256,8 +256,8 @@ the GIMP plugin does not use it:
 
 Sources: HF `hustvl/Moebius` and `hustvl/PixelHacker/vae`. All Apache-2.0.
 
-**Pick the checkpoint by content.** It matters as much as the port does
-(`weights/demo/demo_sheet.png`). Upstream's README runs its face examples with `ft_celebahq`.
+**Pick the checkpoint by content.** It matters as much as the port does.
+Upstream's README runs its face examples with `ft_celebahq`.
 - People and portraits: `ft_celebahq` or `ft_ffhq`. Removing glasses yields believable eyes,
   and identity is kept.
 - Scenes and objects: `ft_places2`. On a face it invents distorted eyes, and with a whole face
@@ -298,7 +298,7 @@ f16 check on `ft_ffhq` and `ft_places2`: only one tensor exceeds the f16 range,
 | Exact e2e (M7) ✅ | Same noise as PyTorch: PSNR ≥ 45 dB (f32 weights) / ≥ 30 dB (f16), whole image (LPIPS dropped: package not installed). ≤ 36 s. RSS ≤ 1.5 GB. Measured below |
 | ROI decode (M8) ❌ | Same latents, ROI vs full decode: PSNR ≥ 40 dB inside the mask. Failed (34.82 dB on 10 eval masks, §5), so Fast decodes in full |
 | Fast preset (M8) ✅ | LPIPS-to-ground-truth ≤ 1.05 × Exact's on ≥ 100 image/mask pairs, overall and per subset, plus visual review. ≤ 12 s from cool. Starts at ≤ 15% image signal. Measured on 120 pairs: scenes 1.016 (CI 1.006–1.027), faces 1.038 (CI 1.025–1.052), all 1.025 (CI 1.016–1.033); 10.74–11.88 s |
-| GIMP (M9) ✅ | Headless run inside GIMP 3.2.6: 0 pixels changed outside the selection, alpha untouched, worker output identical to the CLI. Interactive use by the user: dialog and both checkpoints work |
+| GIMP (M9) ✅ | Headless run inside GIMP 3.2.6: 0 pixels changed outside the selection, alpha untouched, worker output identical to the CLI. Run by hand in GIMP: the dialog and both checkpoints work |
 | Speed regressions | `examples/kernel_bench.rs` now; per-stage timings recorded per milestone |
 
 **End-to-end parity (M7, final code, `cargo run --release --example parity`)**: identical recorded noise, 8-bit output vs PyTorch.

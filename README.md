@@ -115,5 +115,10 @@ src/
   bin/         moebius-cli (`--plugin` makes it the GIMP worker)
 gimp-plugin/   GIMP 3.2 plugin and per-user installer
 include/       C header
-reference/     old ONNX C++ worker and Python plugin (historical)
 ```
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE). Moebius and its weights are by the
+[hustvl/Moebius](https://github.com/hustvl/Moebius) authors, also under Apache-2.0. Weights are not in
+this repo: `docs/PLAN.md` §8 has the sources and hashes.
