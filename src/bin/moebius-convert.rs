@@ -664,7 +664,7 @@ mod tests {
             [Value::Storage(Kind::F32, "0".into()), Value::Int(0), int_tuple(&[2, 3]), int_tuple(stride)]
         };
         assert!(rebuild_tensor(&record(&[3, 1])).is_ok());
-        assert!(rebuild_tensor(&record(&[1])).unwrap_err().contains("mismatched"));
+        assert!(rebuild_tensor(&record(&[1])).is_err_and(|e| e.contains("mismatched")));
     }
 
     #[test]
