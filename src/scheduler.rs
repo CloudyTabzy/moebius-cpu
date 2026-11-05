@@ -1,3 +1,5 @@
+//! Samplers: `Ddim` for Exact and `Dpm2M` (DPM-Solver++(2M)) for Fast.
+//!
 //! DDIM, matching diffusers `DDIMScheduler` exactly as Moebius builds it:
 //! `beta_start=0.00085, beta_end=0.012, scaled_linear, 1000 steps,
 //! clip_sample=False` with the remaining defaults (`set_alpha_to_one=True`,

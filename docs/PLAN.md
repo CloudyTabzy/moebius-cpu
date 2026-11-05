@@ -1,12 +1,12 @@
 # moebius-cpu: Design and Results
 
-*Status: M0–M9 complete except the GIMP dialog check (§10): Exact matches PyTorch, Fast passed its gates (§5) · Date: 2026-11-05*
+*Status: finished. M0–M9 complete: Exact matches PyTorch, Fast passed its gates (§5), and the plugin works in GIMP (§10) · Date: 2026-11-05*
 
 ## 1. Goal
 
 A native, **CPU-only** Rust inference engine for Moebius (0.22B latent-diffusion
-inpainting, hustvl/Moebius, ECCV'26), shipped as a DLL with a C ABI for the GIMP
-plugin, with a **measured and gated speed promise** (§5).
+inpainting, hustvl/Moebius, ECCV'26), shipped as a GIMP 3.2 plugin, with a DLL and
+C ABI for native hosts and a **measured and gated speed promise** (§5).
 
 Non-goals: GPU backends, training, the PixelHacker teacher, batch inference,
 non-x86 targets (x86-64 with AVX2 + FMA required: Haswell / Zen and newer).
@@ -85,8 +85,9 @@ Benchmark CPU: **i7-13620H** (6P + 4E, 16 threads, AVX2, no AVX-512).
 | LayerNorm, 8192 tokens × 320 | 0.41 ms |
 
 "Effective" = direct-convolution FLOPs ÷ time. Winograd does 2.25× fewer multiplies.
-The budget below uses **520 GFLOPS** for 1×1, **~850 effective** for stride-1 3×3, **150 GFLOPS**
-for the λ filter (M3, not yet built), and **0.10 s/step** for memory-bound ops.
+The budget planned before the UNet existed used **520 GFLOPS** for 1×1, **~850 effective** for
+stride-1 3×3, **150 GFLOPS** for the λ filter, and **0.10 s/step** for memory-bound ops. §5 has
+the stage times measured since.
 
 **PyTorch baseline (measured):** the upstream pipeline on the i7-13620H (torch 2.11 CPU, f32)
 takes **62–69 s** per Exact inpaint (`tools/dump_golden.py` run, M1).
@@ -122,6 +123,9 @@ The promise holds for a one-off inpaint, which is how GIMP uses it. Long back-to
 batches slow to a ~30 s median because of the sustained power limit, not the code.
 The Fast preset (M8) is the headroom for that case. Fast's own margin is thin: its slowest cool
 run was 11.88 s, and back-to-back runs exceed 12 s.
+
+The plugin pays 1–2 s more per run, which the promise does not cover: it loads the model and moves
+PNGs every time. Inside GIMP, Fast took 12.0–13.6 s over 7 runs and Exact 27.0 s in its one run.
 
 Without the EcoQoS opt-out (`engine::cpu::disable_power_throttling`), Windows steers background
 console processes to the efficiency cores and a run is 10–15× slower. rusty_alloc is opt-in: no
@@ -180,8 +184,8 @@ If Fast cannot meet both its time and quality gates, we report back instead of s
 - **Weights f16** (`src/weights.rs`, `engine/param.rs`). They are read from the memory-mapped file
   into f16 `Param`s at load. Each GEMM weight is widened to f32 (F16C) into a reusable panel
   (≤33 MB, the 1280→6400 layer) right before its GEMM; the 1×1 numbers in §4 include this.
-  Winograd convs transform f16 weights directly. If f16 fails the parity gate, the fallback is
-  f32 weights (1.24 GB, peak ≈ 2 GB).
+  Winograd convs transform f16 weights directly. f16 passed the parity gate (§9). f32 weights
+  (1.24 GB, peak ≈ 2 GB) remain available for comparison.
 - **Kernel scratch** (`engine::Scratch`, grown once): weight panel ≤33 MB, strided-conv patch
   band ≤32 MB, Winograd tiles / products / kernel ≤16 / 32 / 32 MB.
 
@@ -216,7 +220,7 @@ GEMM-scheduling problem, solved by `private-gemm-x86`'s scheduler (§4), not by 
 
 ### 6.5 Exact-preserving savings
 - The time embedding is computed once per step and shared by both CFG halves.
-- Not yet done (small): the CFG halves are identical until the first cross-λ, so `conv_in`, the
+- Not done (small): the CFG halves are identical until the first cross-λ, so `conv_in`, the
   first resnet and the first self-λ could run at batch 1 (~2% of a step).
 
 ## 7. Pipeline and plugin integration
@@ -226,13 +230,20 @@ Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.
 - The window is **shifted, not clipped**, at image edges. The old plugin's clipped crops were non-square.
 - Edge-replicated padding is used only when the image is smaller than the window.
 
-**C ABI** (`include/moebius_cpu.h`, `src/ffi.rs`, implemented and tested):
+**GIMP plugin** (`gimp-plugin/`):
+- GIMP's Python is a MINGW build and cannot load MSVC binaries, so inference runs out of process.
+- `moebius-inpaint.py` writes the layer and selection to temporary PNGs and runs
+  `moebius-cli.exe --plugin`. The result comes back through the shadow buffer, which limits it to
+  the selection.
+- The worker prints `PROGRESS <stage> <done> <total>` for GIMP's progress bar. It exits with code 3
+  when stdin closes, so a killed plugin leaves no process behind.
+- `install.bat` copies the plugin, worker and both checkpoints into the user's GIMP profile (~1.3 GB).
+
+**C ABI** (`include/moebius_cpu.h`, `src/ffi.rs`, implemented and tested). It serves native hosts;
+the GIMP plugin does not use it:
 - create / destroy / inpaint, in place on RGB(A) u8, returning the changed rect.
 - Progress callback with cancel.
 - Thread-local error string. Panics are caught at the boundary.
-- The plugin loads the DLL at runtime (`LoadLibraryW`, Zig `std.DynLib`). An MSVC-built DLL
-  exposing only C types needs no MinGW import library, and a missing DLL or unsupported CPU
-  becomes a dialog instead of a failed plugin load.
 
 ## 8. Weights
 
@@ -251,7 +262,8 @@ Sources: HF `hustvl/Moebius` and `hustvl/PixelHacker/vae`. All Apache-2.0.
   and identity is kept.
 - Scenes and objects: `ft_places2`. On a face it invents distorted eyes, and with a whole face
   masked it paints a room.
-- The plugin should let the user choose, defaulting to portrait or scene by context.
+- The plugin's **Content** choice picks the checkpoint: Scenes and objects (`ft_places2`, the
+  default) or Faces (`ft_celebahq`).
 
 Local layout (`weights/` is git-ignored), mirroring the HF repos:
 
@@ -286,6 +298,7 @@ f16 check on `ft_ffhq` and `ft_places2`: only one tensor exceeds the f16 range,
 | Exact e2e (M7) ✅ | Same noise as PyTorch: PSNR ≥ 45 dB (f32 weights) / ≥ 30 dB (f16), whole image (LPIPS dropped: package not installed). ≤ 36 s. RSS ≤ 1.5 GB. Measured below |
 | ROI decode (M8) ❌ | Same latents, ROI vs full decode: PSNR ≥ 40 dB inside the mask. Failed (34.82 dB on 10 eval masks, §5), so Fast decodes in full |
 | Fast preset (M8) ✅ | LPIPS-to-ground-truth ≤ 1.05 × Exact's on ≥ 100 image/mask pairs, overall and per subset, plus visual review. ≤ 12 s from cool. Starts at ≤ 15% image signal. Measured on 120 pairs: scenes 1.016 (CI 1.006–1.027), faces 1.038 (CI 1.025–1.052), all 1.025 (CI 1.016–1.033); 10.74–11.88 s |
+| GIMP (M9) ✅ | Headless run inside GIMP 3.2.6: 0 pixels changed outside the selection, alpha untouched, worker output identical to the CLI. Interactive use by the user: dialog and both checkpoints work |
 | Speed regressions | `examples/kernel_bench.rs` now; per-stage timings recorded per milestone |
 
 **End-to-end parity (M7, final code, `cargo run --release --example parity`)**: identical recorded noise, 8-bit output vs PyTorch.
@@ -316,18 +329,23 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | **M6** ✅ | VAE encoder / decoder | Parity; encode 2.8–3.2 s (B=2), decode 2.7–3.1 s |
 | **M7** ✅ | Pipeline, resize, blend (Pillow-exact), CLI | Exact e2e gate (§9); 24–25 s cool; 1.42 GB peak |
 | **M8** ✅ | Fast preset tuning, eval tooling, DPM-Solver++(2M), compensated paste | Fast gates (§9); 10.7–11.9 s cool; ROI decode rejected |
-| **M9** | `gimp-plugin/`: Python glue, `moebius-cli --plugin` worker, per-user installer, progress, orphan-safe cancel | Headless run inside GIMP 3.2.6 ✅: Fast 13–14 s, Exact 27 s including load and PNG transfer; 0 pixels changed outside the selection; alpha untouched. Not yet exercised: the interactive dialog and the cancel button |
+| **M9** ✅ | `gimp-plugin/`: Python glue, `moebius-cli --plugin` worker, per-user installer, progress, orphan-safe cancel | §9 GIMP gate; Fast 12.0–13.6 s, Exact 27.0 s including load and PNG transfer |
+
+Closed 2026-11-05. Left open: the plugin has only been tested on the i7-13620H, GIMP's cancel button has not
+been clicked by hand (the worker's exit on a closed stdin is tested), and the installer needs
+converted weights, so there is no one-click package.
 
 ## 11. Risks
 
-| Risk | Mitigation |
+| Risk | Outcome |
 |---|---|
-| f16 weights miss parity | Per-tensor f32 fallback in the converter; global f32 mode (+0.6 GB) |
+| f16 weights miss parity | Did not happen (§9). Per-tensor f32 fallback in the converter; global f32 mode (+0.6 GB) |
 | Sustained power limit (measured: ~340–600 GFLOPS cycles) | Promise stated per single inpaint; sustained batches documented at a ~30 s median; Fast preset (M8) for headroom |
 | E-core stragglers in GEMM | Resolved: `private-gemm-x86` balances P/E cores (§4) |
-| RAM pressure inside GIMP | f16 + mmap + static plan; RSS gate |
-| Fast quality gate fails | Re-tune steps / CFG cutoff / ROI margin within 12 s, or report back |
-| Exact needs to be faster | INT8 W8A8 1×1 GEMMs via AVX-VNNI (≈1.5–2× on 62% of UNet FLOPs), behind its own quality gate, after M9 |
+| RAM pressure inside GIMP | The worker is a separate process that exits after each run; 1.42 GB peak (§5) |
+| Fast quality gate fails | Did not happen (§9) |
+| Exact needs to be faster | Did not happen. If it ever does: INT8 W8A8 1×1 GEMMs via AVX-VNNI (≈1.5–2× on 62% of UNet FLOPs), behind its own quality gate |
+| Other CPUs behave differently | Open: only tested on the i7-13620H |
 
 ## 12. Dependencies
 
@@ -341,7 +359,8 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | `rand` 0.10, `rand_distr` 0.6 | Initial noise |
 | `num_cpus` 1.17 | Physical-core pool size |
 | `thiserror` 2 | Errors |
-| `image` 0.25, `clap` 4 (feature `cli`) | Developer CLI only |
+| `image` 0.25, `clap` 4, `serde_json` 1 (feature `cli`) | `moebius-cli`, which is also the plugin worker; `serde_json` is for the eval runner |
+| `rusty_alloc-api` 2.2.7 (feature `rusty-alloc`) | Opt-in allocator, off by default (§5) |
 
 Not used: `imageproc` (the σ=3 feather is a 20-line separable blur),
-`serde`/`serde_json` (no runtime config), `anyhow`.
+`serde`, `anyhow`.

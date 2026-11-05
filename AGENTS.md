@@ -1,6 +1,7 @@
 # Agent notes for moebius-cpu
 
 Rules for anyone (human or agent) working in this repo. Design and measurements are in `docs/PLAN.md`.
+The project is finished (M0–M9), so any work from here is maintenance.
 
 ## Privacy
 

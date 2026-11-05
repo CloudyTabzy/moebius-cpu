@@ -9,7 +9,7 @@ publish = false
 
 [lib]
 name = "moebius_cpu"
-# rlib for the CLI/tests, cdylib for the GIMP plugin (C ABI, see include/moebius_cpu.h).
+# rlib for the CLI/tests, cdylib for native hosts (C ABI, see include/moebius_cpu.h).
 crate-type = ["rlib", "cdylib"]
 
 [[bin]]
@@ -37,7 +37,7 @@ default = []
 # (0 ms-10 s) it peaks like the system allocator (~1.39 GiB) and is 0-5% slower.
 # The engine's buffer pool already removed the allocation churn it would fix.
 rusty-alloc = ["dep:rusty_alloc-api"]
-# Developer CLI: PNG in/out + argument parsing. The plugin build does not need it.
+# moebius-cli: PNG in/out + argument parsing. It is also the GIMP plugin's worker.
 cli = ["dep:image", "dep:clap", "dep:serde_json"]
 
 [dependencies]

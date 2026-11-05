@@ -2,14 +2,14 @@
 //! latent-diffusion inpainting model (hustvl/Moebius, ECCV'26).
 //!
 //! The engine is purpose-built for this one network: NHWC f32 activations,
-//! f16 weights memory-mapped from safetensors, all dense math through the
-//! `gemm` crate, and fused hand-written kernels for everything else.
+//! f16 weights memory-mapped from safetensors, dense math through
+//! `private-gemm-x86` and `gemm`, and fused hand-written kernels for everything else.
 //! See `docs/PLAN.md` for the design, the measured compute budget and the
 //! speed promise.
 //!
-//! Status: runs end to end and matches upstream PyTorch (`tests/parity.rs`,
-//! `examples/parity.rs`). The Fast preset passed its gates (M8); still open:
-//! the GIMP plugin hookup (M9).
+//! Status: finished. It matches upstream PyTorch (`tests/parity.rs`,
+//! `examples/parity.rs`), the Fast preset passed its gates, and GIMP runs it
+//! through the `moebius-cli` worker (`gimp-plugin/`).
 
 /// Opt-in (`--features rusty-alloc`): the pure-Rust mimalloc remake as the
 /// allocator of every Rust allocation in this crate's artifacts. Off by default:

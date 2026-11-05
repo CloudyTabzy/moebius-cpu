@@ -1,11 +1,11 @@
-//! C ABI for the GIMP plugin. Mirrors `include/moebius_cpu.h`; keep the two
+//! C ABI for native hosts (the GIMP plugin uses `moebius-cli` instead). Mirrors `include/moebius_cpu.h`; keep the two
 //! in sync and bump `MOEBIUS_ABI_VERSION` on any change.
 //!
 //! Conventions: every entry point returns a status code; on failure the
 //! message is available from `moebius_last_error()` on the same thread.
 //! Panics never cross the boundary — they are caught and reported as
 //! `MOEBIUS_ERR_INTERNAL`. The library is MSVC-built but exposes only C
-//! types, so the Zig/MinGW plugin links it as a plain DLL.
+//! types, so a MinGW or Zig host can link it as a plain DLL.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
