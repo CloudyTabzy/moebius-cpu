@@ -1,6 +1,6 @@
 # moebius-cpu: Design and Results
 
-*Status: M0–M7 complete: Moebius runs end to end in pure Rust, matching PyTorch (§5) · Date: 2026-10-29*
+*Status: M0–M8 complete: Exact matches PyTorch and Fast passed its gates (§5) · Date: 2026-11-05*
 
 ## 1. Goal
 
@@ -111,16 +111,21 @@ benchmarks catch the burst phase; back-to-back inpaints settle into the sustaine
 All targets are for one 512² inpaint on the i7-13620H, wall clock
 from the `moebius_inpaint` call to return, with weights already loaded.
 
-| Mode | Target | Measured (M7, 2026-10-29) | What it is |
+| Mode | Target | Measured (2026-11-05) | What it is |
 |---|---|---|---|
-| **Exact** | **≤ 36 s** (stretch ≤ 30 s) | ✅ **24–25 s** from cool (stretch met); **34–38 s** under sustained back-to-back load (power-limited, see §4) | Same pipeline as upstream. Parity-gated against PyTorch. 2.5× faster than PyTorch's 62–69 s. |
-| **Fast** | **≤ 12 s** (stretch ≤ 9 s) | not yet (M8) | Approximations below; quality-gated (§9). |
-| Peak working set | ≤ 1.5 GB | ✅ **1.36–1.37 GiB (1.42–1.44 GB)** | f16 weights (~650 MB) + pooled activations + kernel scratch |
+| **Exact** | **≤ 36 s** (stretch ≤ 30 s) | ✅ **24–25 s** from cool (stretch met); median **~30 s** under sustained back-to-back load (28–37 s, power-limited, see §4) | Same pipeline as upstream. Parity-gated against PyTorch. 2.5× faster than PyTorch's 62–69 s. |
+| **Fast** | **≤ 12 s** (stretch ≤ 9 s) | ✅ **10.7–11.9 s** from cool, median 11.5 s, 10 images (stretch not met); ~13.2 s sustained | Approximations below; quality-gated (§9). |
+| Peak working set | ≤ 1.5 GB | ✅ **1.36–1.37 GiB (1.42–1.44 GB)** Exact, 1.33 GiB (1.42 GB) Fast | f16 weights (~650 MB) + pooled activations + kernel scratch |
 | Engine load | ≤ 1.5 s | ✅ 0.31–0.36 s | mmap + constant precompute |
 
 The promise holds for a one-off inpaint, which is how GIMP uses it. Long back-to-back
-batches slow to ~34–38 s because of the sustained power limit, not the code.
-The Fast preset (M8) is the headroom for that case.
+batches slow to a ~30 s median because of the sustained power limit, not the code.
+The Fast preset (M8) is the headroom for that case. Fast's own margin is thin: its slowest cool
+run was 11.88 s, and back-to-back runs exceed 12 s.
+
+Without the EcoQoS opt-out (`engine::cpu::disable_power_throttling`), Windows steers background
+console processes to the efficiency cores and a run is 10–15× slower. rusty_alloc is opt-in: no
+configuration beat the system allocator inside the memory gate (`tools/bench_alloc.py`).
 
 How the measured number was reached (each step parity-neutral, verified against the golden set):
 
@@ -133,16 +138,27 @@ How the measured number was reached (each step parity-neutral, verified against 
 
 Measured stage times (cool): UNet step 1.04–1.17 s, VAE encode (B=2) 2.8–3.2 s, decode 2.7–3.1 s.
 
-**Fast preset** (`src/preset.rs`; the values are starting points, M8 tunes them inside the 12 s budget):
+**Fast preset** (`src/preset.rs`):
 
 | Lever | Saving | Effect |
 |---|---|---|
-| 7 steps (6 run, from t=710) | 19 → 6 UNet steps | Fewer denoising steps |
-| CFG on the first 3 steps only | last 3 steps at batch 1 | Guidance matters most early |
-| `single_encode`: one VAE encode (masked image) | −1.1 TFLOP (−2.3 s) | Initial noise built from masked latents (removes the 11.9% object leak, changes the trajectory) |
-| `roi_decode`: decode mask bbox + 8 latents (64 px) | −25…−70% of decode | Decoder mid-attention sees the window. The window border is ≥64 px outside the mask, beyond the σ=3 feather, so it is never pasted. |
+| 10 steps, trailing spacing (9 run, from t=899) | 19 → 9 UNet steps | Starts with 12.0% image signal, like Exact's 11.9% |
+| DPM-Solver++(2M) instead of DDIM | Same cost, fewer steps needed | Matches diffusers step for step. At 9 UNet steps: 1.008/1.034 vs DDIM's 1.022/1.048 on the 24-pair dev set |
+| CFG on the first 3 steps only | last 6 steps at batch 1 | Same LPIPS as 4 steps in the dev sweep |
+| `roi_encode`: second encode covers the mask's window only | ~0.55 s | `z_img` only supplies the ~12% starting signal. No measurable LPIPS change (1.037/1.082 vs 1.037/1.081) |
 
-Fast projection: 3 × 1.14 + 3 × 0.58 = 5.2 s UNet, + 1.4 s encode, + 0.9–2.1 s decode, + 0.3 s.
+Rejected, on measurements:
+
+- **`single_encode`:** dropping the image encode costs 1.19–1.20× LPIPS. Removed.
+- **`roi_decode`:** fails the 40 dB gate, so no preset uses it. Decoder GroupNorm statistics need
+  the whole frame. On the 10 gate pairs a latent crop reaches 34.67 dB at worst. Cropping after
+  `up_blocks.1` reaches 42.75 dB there, but on 60 random small windows it falls to 20.36 dB, and
+  27 of the 60 miss 40 dB. The best variant tried (crop after `up_blocks.0`, margin 16) still has
+  8 of 60 below, worst 34.26 dB. Cropping after `up_blocks.2` is far worse (23.41 dB on the gate
+  pairs); the cause is not understood. A low-res pass to estimate the statistics would cost
+  ~0.8 s, most of the ~1.2 s saving on large masks. LPIPS did not show any of this: the eval's
+  masks are large and scattered.
+- **9 steps instead of 10:** 0.6 s faster, but faces reach 1.047 (CI 1.033–1.061).
 
 **Gating rule:** a milestone isn't done until its time gate passes on the i7-13620H.
 If Fast cannot meet both its time and quality gates, we report back instead of shipping it.
@@ -268,8 +284,8 @@ f16 check on `ft_ffhq` and `ft_places2`: only one tensor exceeds the f16 range,
 | Kernels (M2) ✅ | PyTorch fixtures + naive f64 references. 1×1 ≥ 450 GFLOPS, 3×3 ≥ 420 GFLOPS. Memory-bound kernels: total ≤ 0.10 s per UNet step* |
 | Blocks (M3–M6) ✅ | Golden tensors from `tools/dump_golden.py` with fixed noise. Rel L2 ≤ 1e-4 with f32 weights, ≤ 2e-3 with f16. Measured: f32 ≤ 4.7e-6 per block (39 UNet tensors), f16 ≤ 1.9e-3; VAE ≤ 2.9e-5 |
 | Exact e2e (M7) ✅ | Same noise as PyTorch: PSNR ≥ 45 dB (f32 weights) / ≥ 30 dB (f16), whole image (LPIPS dropped: package not installed). ≤ 36 s. RSS ≤ 1.5 GB. Measured below |
-| ROI decode (M8) | Same latents, ROI vs full decode: PSNR ≥ 40 dB inside the mask |
-| Fast preset (M8) | LPIPS-to-ground-truth ≤ 1.05 × Exact's on ≥ 100 image/mask pairs, plus visual review. ≤ 12 s |
+| ROI decode (M8) ❌ | Same latents, ROI vs full decode: PSNR ≥ 40 dB inside the mask. Failed (34.82 dB on 10 eval masks, §5), so Fast decodes in full |
+| Fast preset (M8) ✅ | LPIPS-to-ground-truth ≤ 1.05 × Exact's on ≥ 100 image/mask pairs, overall and per subset, plus visual review. ≤ 12 s from cool. Starts at ≤ 15% image signal. Measured on 120 pairs: scenes 1.016 (CI 1.006–1.027), faces 1.038 (CI 1.025–1.052), all 1.025 (CI 1.016–1.033); 10.74–11.88 s |
 | Speed regressions | `examples/kernel_bench.rs` now; per-stage timings recorded per milestone |
 
 **End-to-end parity (M7, final code, `cargo run --release --example parity`)**: identical recorded noise, 8-bit output vs PyTorch.
@@ -299,7 +315,7 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | **M5** ✅ | UNet + embeddings | Parity; 1.04–1.17 s/step at batch 2 (cool) |
 | **M6** ✅ | VAE encoder / decoder | Parity; encode 2.8–3.2 s (B=2), decode 2.7–3.1 s |
 | **M7** ✅ | Pipeline, resize, blend (Pillow-exact), CLI | Exact e2e gate (§9); 24–25 s cool; 1.42 GB peak |
-| M8 | Fast preset tuning (+ eval tooling) | Fast gates (§9), ≤ 12 s |
+| **M8** ✅ | Fast preset tuning, eval tooling, DPM-Solver++(2M), compensated paste | Fast gates (§9); 10.7–11.9 s cool; ROI decode rejected |
 | M9 | Plugin hookup, packaging, cancel/progress UX | GIMP smoke test on benchmark CPU |
 
 ## 11. Risks
@@ -307,7 +323,7 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | Risk | Mitigation |
 |---|---|
 | f16 weights miss parity | Per-tensor f32 fallback in the converter; global f32 mode (+0.6 GB) |
-| Sustained power limit (measured: ~340–600 GFLOPS cycles) | Promise stated per single inpaint; sustained batches documented at 34–38 s; Fast preset (M8) for headroom |
+| Sustained power limit (measured: ~340–600 GFLOPS cycles) | Promise stated per single inpaint; sustained batches documented at a ~30 s median; Fast preset (M8) for headroom |
 | E-core stragglers in GEMM | Resolved: `private-gemm-x86` balances P/E cores (§4) |
 | RAM pressure inside GIMP | f16 + mmap + static plan; RSS gate |
 | Fast quality gate fails | Re-tune steps / CFG cutoff / ROI margin within 12 s, or report back |

@@ -22,7 +22,7 @@ const BETA_END: f64 = 0.012;
 pub enum Spacing {
     /// Upstream Moebius (diffusers default): 0, r, 2r, … reversed.
     Leading,
-    /// Starts at t = 999; candidate for the Fast preset's short schedules.
+    /// Starts at t = 999; the Fast preset's short schedule.
     Trailing,
 }
 

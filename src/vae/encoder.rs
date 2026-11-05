@@ -1,7 +1,8 @@
 //! VAE encoder: conv_in → 4 down levels (last without downsample) →
 //! mid (resnet, attention, resnet) → GN+SiLU → conv_out (8 ch = mean ‖
 //! logvar) → quant_conv. Runs image and masked image as one batch of 2
-//! (Exact) or the masked image alone (Fast `single_encode`).
+//! (Exact), or each on its own with the image cropped to the mask's window
+//! (Fast `roi_encode`; any size divisible by 8).
 //!
 //! `Downsample2D(padding=0)` is `F.pad(x, (0, 1, 0, 1))` then a stride-2 3x3
 //! conv, i.e. `Conv3x3 { stride: 2, pad: [0, 0, 1, 1] }`.
@@ -71,8 +72,8 @@ impl Encoder {
         })
     }
 
-    /// `images`: `[b, 512, 512, 3]` in [-1, 1]. Returns scaled latents
-    /// `[b, 64, 64, 4]`, sampling the posterior with `noise`.
+    /// `images`: `[b, h, w, 3]` in [-1, 1]. Returns scaled latents
+    /// `[b, h/8, w/8, 4]`, sampling the posterior with `noise`.
     pub fn encode(&self, images: &Tensor, noise: &Tensor, s: &mut Scratch) -> Tensor {
         assert_eq!(images.c, IMAGE_CHANNELS, "VAE encoder expects RGB");
         assert_eq!(noise.shape(), [images.n, images.h / 8, images.w / 8, LATENT_CHANNELS], "VAE noise shape");

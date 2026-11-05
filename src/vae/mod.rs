@@ -43,7 +43,7 @@ use crate::unet::load::Loader;
 use crate::weights::Weights;
 use crate::{Error, Result};
 
-/// Latent window for ROI decoding (Fast preset), in latent pixels.
+/// Latent window around the mask (`roi_encode`, `roi_decode`), in latent pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LatentRect {
     pub x: usize,
@@ -52,11 +52,11 @@ pub struct LatentRect {
     pub h: usize,
 }
 
-/// Latents of context added on every side of the mask bbox for ROI decoding. The
-/// decoder's receptive field is ~4 latents (a few 3x3 convs per level, damped by the
-/// upsampling), the paste feather reaches 7 px (< 1 latent), and the 8 px mask sampling
-/// grid of `mask_lat` can miss up to one latent cell of mask: 8 covers all of it with
-/// room for the window-local mid attention and GroupNorm statistics.
+/// Latents of context added on every side of the mask bbox. The decoder's receptive
+/// field is ~4 latents (a few 3x3 convs per level, damped by the upsampling), the paste
+/// feather reaches 7 px (< 1 latent), and the 8 px mask sampling grid of `mask_lat` can
+/// miss up to one latent cell of mask. No margin makes the window-local GroupNorm
+/// statistics safe for decoding, which is why no preset uses `roi_decode`.
 pub const ROI_MARGIN: usize = 8;
 
 /// Bounding box of the nonzero entries of `mask_lat` (`64 x 64`, row-major, 0/1), grown by
@@ -112,8 +112,9 @@ impl Vae {
     /// grid): `[1, 8·roi.h, 8·roi.w, 3]`, `(x + 1) / 2`, unclamped. The decoder is fully
     /// convolutional, so this is `decode` of the cropped latent: pixels away from the
     /// window border match the full decode closely, but the mid-block attention and the
-    /// GroupNorm statistics see the window only, and the border sees zero padding. A
-    /// window covering the whole latent is exactly `decode`.
+    /// GroupNorm statistics see the window only, and the border sees zero padding. That
+    /// costs 20-30 dB on some small windows (`docs/PLAN.md` §5). A window covering the
+    /// whole latent is exactly `decode`.
     pub fn decode_roi(&self, latents: &Tensor, roi: LatentRect, s: &mut Scratch) -> Tensor {
         self.decoder.decode_roi(latents, roi, s)
     }

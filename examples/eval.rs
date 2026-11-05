@@ -42,7 +42,6 @@ enum SpacingArg {
 enum SolverArg {
     Ddim,
     Dpm,
-    DpmContinuous,
 }
 
 /// `--cfg-steps N` or `--cfg-steps none` (guidance on every step).
@@ -86,8 +85,6 @@ struct Args {
     #[arg(long)]
     strength: Option<f64>,
     #[arg(long)]
-    single_encode: Option<bool>,
-    #[arg(long)]
     roi_encode: Option<bool>,
     #[arg(long)]
     roi_decode: Option<bool>,
@@ -116,7 +113,6 @@ fn config_json(args: &Args, p: &InpaintParams) -> Value {
         "guidance": p.guidance,
         "noise_offset": p.noise_offset,
         "cfg_steps": p.cfg_steps,
-        "single_encode": p.single_encode,
         "roi_encode": p.roi_encode,
         "roi_decode": p.roi_decode,
         "paste": format!("{:?}", p.paste),
@@ -147,7 +143,6 @@ fn main() -> Result<(), BoxErr> {
         base.solver = match v {
             SolverArg::Ddim => Solver::Ddim,
             SolverArg::Dpm => Solver::DpmPp2M,
-            SolverArg::DpmContinuous => Solver::DpmPp2MContinuous,
         };
     }
     if let Some(v) = args.strength {
@@ -155,9 +150,6 @@ fn main() -> Result<(), BoxErr> {
     }
     if let Some(v) = args.roi_encode {
         base.roi_encode = v;
-    }
-    if let Some(v) = args.single_encode {
-        base.single_encode = v;
     }
     if let Some(v) = args.roi_decode {
         base.roi_decode = v;

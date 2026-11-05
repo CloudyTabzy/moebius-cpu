@@ -8,8 +8,8 @@
 //! speed promise.
 //!
 //! Status: runs end to end and matches upstream PyTorch (`tests/parity.rs`,
-//! `examples/parity.rs`). ROI decode and compensated paste are in; still
-//! open: the Fast preset's measured parameters (M8) and the GIMP plugin hookup (M9).
+//! `examples/parity.rs`). The Fast preset passed its gates (M8); still open:
+//! the GIMP plugin hookup (M9).
 
 /// Opt-in (`--features rusty-alloc`): the pure-Rust mimalloc remake as the
 /// allocator of every Rust allocation in this crate's artifacts. Off by default:

@@ -24,7 +24,7 @@ extern "C" {
 #define MOEBIUS_PASTE_DEFAULT            0u
 #define MOEBIUS_PASTE_NONE               1u
 #define MOEBIUS_PASTE_FEATHER            2u
-#define MOEBIUS_PASTE_FEATHER_COMPENSATE 3u /* not ported yet (M8): currently identical to FEATHER */
+#define MOEBIUS_PASTE_FEATHER_COMPENSATE 3u
 
 typedef struct MoebiusEngine MoebiusEngine;
 

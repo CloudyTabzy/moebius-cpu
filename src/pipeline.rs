@@ -5,8 +5,8 @@
 //!  2  window → 512² RGB [-1,1] + binary mask (Lanczos)      imaging::resize
 //!  3  masked = rgb · (1 − mask)
 //!  4  z_img, z_masked = VAE.encode([rgb, masked]) · 0.13025 vae::encoder
-//!       (single_encode: z_img := z_masked; roi_encode: only the
-//!       image around the mask is encoded, pasted over z_masked)
+//!       (Fast/roi_encode: only the image around the mask is
+//!       encoded, pasted over z_masked)
 //!  5  mask_lat = nearest(mask → 64²)
 //!  6  noise = N(0,1) + noise_offset · N(0,1)[per channel]   seeded
 //!  7  x = noise if strength ≥ 1 else add_noise(z_img, noise, t₀)
@@ -15,8 +15,9 @@
 //!        ε = ε_u + g·(ε_c − ε_u)                            (CFG steps)
 //!        x = solver.step(ε, t, x)                           DDIM / DPM++(2M)
 //!        progress(); bail out if cancelled
-//!  9  rgb = VAE.decode(x / 0.13025)  (Fast: ROI window)     vae::decoder
-//!       ROI: decode latents[bbox(mask_lat) ± 8], rest = input image
+//!  9  rgb = VAE.decode(x / 0.13025)                         vae::decoder
+//!       (roi_decode, in no preset: decode latents[bbox(mask_lat) ± 8],
+//!       rest = input image)
 //! 10  resize back to window, paste with feathered mask      imaging::blend
 //! ```
 //! Everything runs inside the engine's own rayon pool, sized to physical
@@ -252,13 +253,7 @@ impl Engine {
 
         // 4: VAE-encode [image, masked] as one batch (posterior sampled with the given noise).
         let window = roi_window(&mask_lat, ROI_MARGIN).filter(|r| r.w < LATENT_SIZE || r.h < LATENT_SIZE);
-        let (z_img, z_masked) = if params.single_encode {
-            let masked = Tensor::from_vec(masked, 1, IMAGE_SIZE, IMAGE_SIZE, 3);
-            let z = self.pool.install(|| self.vae.encode(&masked, &noise.vae_masked, &mut scratch));
-            let v = z.data.to_vec();
-            scratch.recycle(z);
-            (v.clone(), v)
-        } else if let (true, Some(r)) = (params.roi_encode, window) {
+        let (z_img, z_masked) = if let (true, Some(r)) = (params.roi_encode, window) {
             let masked = Tensor::from_vec(masked, 1, IMAGE_SIZE, IMAGE_SIZE, 3);
             let z = self.pool.install(|| self.vae.encode(&masked, &noise.vae_masked, &mut scratch));
             let z_masked = z.data.to_vec();
@@ -339,8 +334,8 @@ impl Engine {
             }
             match params.solver {
                 Solver::Ddim => ddim.step(&eps, t, &mut x),
-                Solver::DpmPp2M | Solver::DpmPp2MContinuous => {
-                    if params.solver == Solver::DpmPp2M && params.cfg_steps == Some(i) {
+                Solver::DpmPp2M => {
+                    if params.cfg_steps == Some(i) {
                         dpm.restart();
                     }
                     dpm.step(&ddim, &eps, i, &mut x);

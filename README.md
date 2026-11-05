@@ -8,23 +8,22 @@ The design, measurements and speed promise are in **[docs/PLAN.md](docs/PLAN.md)
 
 ## Status
 
-Milestones M0–M7 are done: **Moebius runs end to end in pure Rust and matches PyTorch.**
+Milestones M0–M8 are done: **Moebius runs end to end in pure Rust and matches PyTorch.**
 Given the same noise, the 8-bit output reaches 74.6–78.6 dB PSNR vs upstream with f32 weights
 and 49.6–61.9 dB with f16 (8 test pairs). Every block is checked against recorded PyTorch
 tensors (`tests/parity.rs`).
 
 Still to do:
-- M8: tune and quality-gate the Fast preset.
 - M9: hook up the GIMP plugin through the C ABI.
 
 ## Targets (i7-13620H, 512² window)
 
 | Mode | Committed | Measured | Notes |
 |---|---|---|---|
-| Exact | ≤ 36 s | **24–25 s** (34–38 s under sustained back-to-back load) | Upstream pipeline, parity-gated. PyTorch CPU: 62–69 s |
-| Fast | ≤ 12 s | M8 | Fewer steps, partial CFG, single encode, ROI decode; quality-gated |
+| Exact | ≤ 36 s | **24–25 s** (~30 s median under sustained back-to-back load) | Upstream pipeline, parity-gated. PyTorch CPU: 62–69 s |
+| Fast | ≤ 12 s | **10.7–11.9 s** (~13 s sustained) | 9 DPM-Solver++ steps, partial CFG, region-only image encode. LPIPS within 1.04× of Exact on 120 pairs |
 
-Peak working set 1.42 GB (≤ 1.5 GB). Engine load ~0.35 s. Requires x86-64 with AVX2 + FMA.
+Peak working set 1.42–1.44 GB (≤ 1.5 GB). Engine load ~0.35 s. Requires x86-64 with AVX2 + FMA.
 Pure Rust: dense math on `private-gemm-x86` (multi-threaded) and `gemm` (Winograd tiles).
 
 ## Run it

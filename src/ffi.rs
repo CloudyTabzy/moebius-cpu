@@ -33,7 +33,7 @@ pub const MOEBIUS_PRESET_FAST: u32 = 1;
 pub const MOEBIUS_PASTE_DEFAULT: u32 = 0;
 pub const MOEBIUS_PASTE_NONE: u32 = 1;
 pub const MOEBIUS_PASTE_FEATHER: u32 = 2;
-/// Not ported yet (M8): currently identical to `MOEBIUS_PASTE_FEATHER`.
+/// Feather plus mean-colour compensation (upstream `cps=True`).
 pub const MOEBIUS_PASTE_FEATHER_COMPENSATE: u32 = 3;
 
 /// Opaque handle.
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(resolve_params(Some(&p)).unwrap(), Preset::Exact.params());
         let fast = MoebiusParams { preset: 1, steps: 9, ..p };
         let r = resolve_params(Some(&fast)).unwrap();
-        assert_eq!((r.steps, r.roi_decode), (9, true));
+        assert_eq!((r.steps, r.roi_encode), (9, true));
         assert!(resolve_params(Some(&MoebiusParams { preset: 7, ..p })).is_err());
     }
 }

@@ -1,6 +1,7 @@
 //! Inference presets. `Exact` reproduces upstream `infer/infer_moebius.py`
-//! defaults; `Fast` trades exactness for time within the budget in
-//! `docs/PLAN.md` §5. Fast values are provisional until the M8 quality gate.
+//! defaults. `Fast` keeps Exact's starting noise level and guidance scale and takes
+//! 9 solver steps instead of 19. Measured against Exact on 120 pairs (M8, `docs/PLAN.md`
+//! §5): LPIPS 1.016x scenes, 1.038x faces; 10.7-11.9 s from cool.
 
 use crate::scheduler::Spacing;
 
@@ -26,8 +27,6 @@ pub enum Solver {
     Ddim,
     /// DPM-Solver++(2M), restarting its history where guidance switches off.
     DpmPp2M,
-    /// DPM-Solver++(2M) keeping its history across that switch.
-    DpmPp2MContinuous,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,13 +41,12 @@ pub struct InpaintParams {
     /// Run classifier-free guidance (batch 2) for only the first N denoising
     /// steps, conditional-only (batch 1) afterwards. `None` = every step.
     pub cfg_steps: Option<usize>,
-    /// Encode only the masked image and reuse its latents for the initial
-    /// `add_noise` (saves one of the two VAE encodes).
-    pub single_encode: bool,
     /// Encode the original image only around the mask: `z_img` is `z_masked` with the
-    /// mask's neighbourhood replaced. Ignored with `single_encode`.
+    /// mask's neighbourhood replaced.
     pub roi_encode: bool,
-    /// Decode only the latent window around the mask (+ margin).
+    /// Decode only the latent window around the mask (+ margin). No preset uses this: it
+    /// fails its 40 dB gate, because the decoder's GroupNorm statistics then cover the
+    /// window instead of the frame (`docs/PLAN.md` §5).
     pub roi_decode: bool,
     pub paste: Paste,
     /// Square-kernel mask dilation in pixels before inference (0 = off).
@@ -67,17 +65,17 @@ impl Preset {
                 noise_offset: 0.0357,
                 seed: 0,
                 cfg_steps: None,
-                single_encode: false,
                 roi_encode: false,
                 roi_decode: false,
                 paste: Paste::Feather,
                 mask_dilate: 0,
             },
             Preset::Fast => InpaintParams {
-                steps: 7,
+                steps: 10,
+                spacing: Spacing::Trailing,
+                solver: Solver::DpmPp2M,
                 cfg_steps: Some(3),
-                single_encode: true,
-                roi_decode: true,
+                roi_encode: true,
                 ..Preset::Exact.params()
             },
         }

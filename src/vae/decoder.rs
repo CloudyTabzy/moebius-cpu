@@ -4,9 +4,9 @@
 //! 3x3 conv (`Conv3x3::upsample2x`), so the 4× tensor is never stored.
 //!
 //! Everything is fully convolutional except the mid-block attention, so any
-//! `[1, h, w, 4]` latent decodes to `[1, 8h, 8w, 3]`. ROI decoding (Fast preset,
-//! `decode_roi`) decodes a cropped latent window; the attention then sees the
-//! window's tokens only.
+//! `[1, h, w, 4]` latent decodes to `[1, 8h, 8w, 3]`. ROI decoding (`decode_roi`,
+//! in no preset) decodes a cropped latent window; the attention and GroupNorm then
+//! see the window only.
 
 use rayon::prelude::*;
 
