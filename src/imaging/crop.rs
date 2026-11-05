@@ -1,15 +1,13 @@
 //! Square context window around the mask.
 //!
 //! The model only accepts square 512² input, so the region sent to it must
-//! be square in source pixels too or the result is distorted. The old
-//! Python plugin clipped its window at image edges, producing non-square
-//! crops; here the window is *shifted* to stay inside the image and only
-//! padded (edge-replicated) when the image itself is smaller than the
-//! window on that axis.
+//! be square in source pixels too or the result is distorted. Clipping the
+//! window at image edges would produce non-square crops, so the window is
+//! *shifted* to stay inside the image and only padded (edge-replicated) when
+//! the image itself is smaller than the window on that axis.
 //!
-//! Size: the mask's long side plus 50% margin on each side (as the old
-//! plugin), but never smaller than 512 px when the image allows it, so small
-//! objects are inpainted at native resolution instead of being upscaled, and
+//! Size: the mask's long side plus 50% margin on each side, but never smaller
+//! than 512 px when the image allows it, so small objects are inpainted at native resolution instead of being upscaled, and
 //! never larger than the image's long side: margin that would only be padding
 //! is dropped. A square image therefore never gets padded, and a 512² image
 //! is always used whole, unresampled (upstream semantics; PIL skips

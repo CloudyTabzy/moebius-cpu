@@ -4,9 +4,9 @@
 
 ## 1. Goal
 
-A native, **CPU-only** Rust inference engine for Moebius (0.22B latent-diffusion
-inpainting, hustvl/Moebius, ECCV'26), shipped as a GIMP 3.2 plugin, with a DLL and
-C ABI for native hosts and a **measured and gated speed promise** (§5).
+Bring Moebius (0.22B latent-diffusion inpainting, hustvl/Moebius, ECCV'26) to image editors as a
+plugin: a native, **CPU-only** Rust inference engine, shipped as a GIMP 3.2 plugin, with a DLL and
+C ABI for other native hosts and a **measured and gated speed promise** (§5).
 
 Non-goals: GPU backends, training, the PixelHacker teacher, batch inference,
 non-x86 targets (x86-64 with AVX2 + FMA required: Haswell / Zen and newer).
@@ -99,7 +99,7 @@ kernels) is **1.74×** `gemm` 0.19 on the single multi-threaded GEMMs: its sched
 the hybrid P/E cores, where `gemm`'s even split leaves the P-cores waiting. It is 0.94× on
 Winograd's 16 concurrent single-threaded GEMMs, so those stay on `gemm`. `gemmkit` 0.1.2
 scored 1.53× / 0.99×; its fused epilogue lacks SiLU. In an interleaved A/B on one UNet CFG
-step: 1.04 s vs 1.19–1.27 s. `MOEBIUS_GEMM=gemm` forces the old backend.
+step: 1.04 s vs 1.19–1.27 s. `MOEBIUS_GEMM=gemm` forces `gemm` everywhere.
 
 ### Sustained power
 
@@ -227,7 +227,7 @@ GEMM-scheduling problem, solved by `private-gemm-x86`'s scheduler (§4), not by 
 
 Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.rs`, tested):
 - Square window = mask long side + 50% margin each side, at least 512 px when the image allows (no upscaling of small objects).
-- The window is **shifted, not clipped**, at image edges. The old plugin's clipped crops were non-square.
+- The window is **shifted, not clipped**, at image edges.
 - Edge-replicated padding is used only when the image is smaller than the window.
 
 **GIMP plugin** (`gimp-plugin/`):

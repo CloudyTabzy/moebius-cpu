@@ -1,9 +1,10 @@
 # moebius-cpu
 
-CPU-only native Rust inference engine for **Moebius**, the 0.22B diffusion
-inpainting model ([hustvl/Moebius](https://github.com/hustvl/Moebius), ECCV'26).
-It ships as a GIMP 3.2 plugin, and also builds as a DLL with a C ABI
-(`include/moebius_cpu.h`) for native hosts.
+**Moebius inpainting as a plugin for image editors, running on the CPU.**
+
+[Moebius](https://github.com/hustvl/Moebius) (ECCV'26) is a 0.22B diffusion inpainting model. This
+project runs it in pure Rust, with no GPU, so it can work from inside an image editor. GIMP 3.2 is the
+first host. Other native hosts can use the DLL and its C ABI (`include/moebius_cpu.h`).
 
 The design, measurements and speed promise are in **[docs/PLAN.md](docs/PLAN.md)**.
 
