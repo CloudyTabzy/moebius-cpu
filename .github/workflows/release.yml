@@ -15,7 +15,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build
         run: cargo build --release --features cli --bins
       - name: Test
@@ -28,7 +28,7 @@ jobs:
           Copy-Item gimp-plugin/install.bat, gimp-plugin/install.py, gimp-plugin/moebius-inpaint.py, LICENSE $dir
           Copy-Item target/release/moebius-cli.exe, target/release/moebius-convert.exe $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: moebius-inpaint-gimp-windows
           path: moebius-inpaint-gimp-windows.zip

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "CPU-only native inference engine for the Moebius 0.22B image-inpainting model"
 license = "Apache-2.0"
+repository = "https://github.com/CloudyTabzy/moebius-cpu"
 publish = false
 
 [lib]
