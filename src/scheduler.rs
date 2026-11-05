@@ -8,6 +8,11 @@
 //! `steps_offset=1` and uses `alphas_cumprod[0]` on the final step where
 //! diffusers uses 1.0. Arithmetic is f32 in torch's operation order.
 //! Expected values in the tests come from `tools/dump_ddim_reference.py`.
+//!
+//! [`Dpm2M`] is DPM-Solver++(2M) on the same noise schedule, for the Fast preset's short
+//! schedules: diffusers `DPMSolverMultistepScheduler` with `solver_order=2`,
+//! `algorithm_type="dpmsolver++"`, `final_sigmas_type="zero"`; expected values from
+//! `tools/dump_dpm_reference.py`.
 
 const TRAIN_STEPS: usize = 1000;
 const BETA_START: f64 = 0.00085;
@@ -90,6 +95,61 @@ impl Ddim {
     }
 }
 
+/// `α_t`, `σ_t` and `λ_t = ln(α_t / σ_t)` of timestep `t`.
+fn dpm_coefficients(s: &Ddim, t: usize) -> (f64, f64, f64) {
+    let a = s.alphas_cumprod[t] as f64;
+    let (alpha, sigma) = (a.sqrt(), (1.0 - a).sqrt());
+    (alpha, sigma, alpha.ln() - sigma.ln())
+}
+
+/// DPM-Solver++(2M) state: the previous step's data prediction and its `λ`. The first
+/// step, and the first after [`Dpm2M::restart`], are first order; the last step lands on
+/// the data prediction (`σ = 0`).
+#[derive(Default)]
+pub struct Dpm2M {
+    prev: Option<(Vec<f32>, f64)>,
+}
+
+impl Dpm2M {
+    /// Forgets the history, for when `eps` stops being samples of the same ODE (the
+    /// step where classifier-free guidance switches off).
+    pub fn restart(&mut self) {
+        self.prev = None;
+    }
+
+    /// Advances `sample` from `schedule.timesteps()[i]` to the next timestep, in place.
+    pub fn step(&mut self, schedule: &Ddim, eps: &[f32], i: usize, sample: &mut [f32]) {
+        let steps = schedule.timesteps();
+        let (alpha, sigma, lambda) = dpm_coefficients(schedule, steps[i]);
+        let (inv_alpha, sigma_f) = ((1.0 / alpha) as f32, sigma as f32);
+        let x0: Vec<f32> = sample.iter().zip(eps).map(|(&x, &e)| (x - sigma_f * e) * inv_alpha).collect();
+        let Some(&next) = steps.get(i + 1) else {
+            sample.copy_from_slice(&x0);
+            return;
+        };
+        let (alpha_n, sigma_n, lambda_n) = dpm_coefficients(schedule, next);
+        let h = lambda_n - lambda;
+        let keep = (sigma_n / sigma) as f32;
+        let phi = alpha_n * (1.0 - (-h).exp()); // -α_n (e^{-h} - 1)
+        match &self.prev {
+            None => {
+                let phi = phi as f32;
+                for (x, &d) in sample.iter_mut().zip(&x0) {
+                    *x = keep * *x + phi * d;
+                }
+            }
+            Some((x0_prev, lambda_prev)) => {
+                let r = (lambda - lambda_prev) / h;
+                let (c0, c1) = ((phi * (1.0 + 0.5 / r)) as f32, (phi * 0.5 / r) as f32);
+                for ((x, &d), &p) in sample.iter_mut().zip(&x0).zip(x0_prev) {
+                    *x = keep * *x + c0 * d - c1 * p;
+                }
+            }
+        }
+        self.prev = Some((x0, lambda));
+    }
+}
+
 /// torch: `linspace(√β0, √β1, 1000, f32)² → cumprod(1 - β)` in f32.
 fn scaled_linear_alphas_cumprod() -> Vec<f32> {
     let (start, end) = (BETA_START.sqrt() as f32, BETA_END.sqrt() as f32);
@@ -135,6 +195,42 @@ mod tests {
         let d = Ddim::new(20, 0.99, Spacing::Leading);
         let got: Vec<f32> = [0, 1, 500, 900, 999].iter().map(|&t| d.alpha_cumprod(t)).collect();
         close(&got, &[9.991499782e-01, 9.982960224e-01, 2.763324678e-01, 1.415113267e-02, 4.660095088e-03], 1e-5);
+    }
+
+    /// Values from `tools/dump_dpm_reference.py`: first order, then second order, then
+    /// the final step straight to the data prediction.
+    #[test]
+    fn dpm_solver_matches_diffusers() {
+        let d = Ddim::new(5, 1.0, Spacing::Trailing);
+        assert_eq!(d.timesteps(), &[999, 799, 599, 399, 199]);
+        let want: [[f64; 3]; 5] = [
+            [1.228850083e+00, -2.980257470e+00, 4.364194085e+00],
+            [2.418310907e+00, -5.782050465e+00, 8.090883333e+00],
+            [3.814012762e+00, -9.051524459e+00, 1.235500469e+01],
+            [4.986929961e+00, -1.177817121e+01, 1.581279684e+01],
+            [5.635935287e+00, -1.324560079e+01, 1.747831563e+01],
+        ];
+        let mut x = [0.5f32, -1.25, 2.0];
+        let mut solver = Dpm2M::default();
+        for (i, want) in want.iter().enumerate() {
+            let k = 1.0 + 0.2 * i as f32;
+            solver.step(&d, &[0.1 * k, -0.3 * k, 0.7 * k], i, &mut x);
+            close(&x, want, 2e-5);
+        }
+    }
+
+    #[test]
+    fn dpm_restart_makes_the_next_step_first_order() {
+        let d = Ddim::new(5, 1.0, Spacing::Trailing);
+        let eps = [0.1f32, -0.3, 0.7];
+        let (mut fresh, mut restarted) = (Dpm2M::default(), Dpm2M::default());
+        let mut a = [0.5f32, -1.25, 2.0];
+        let mut b = a;
+        restarted.step(&d, &eps, 0, &mut [1.0, 2.0, 3.0]);
+        restarted.restart();
+        fresh.step(&d, &eps, 1, &mut a);
+        restarted.step(&d, &eps, 1, &mut b);
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use clap::{Parser, ValueEnum};
 use moebius_cpu::imaging::{ImageMut, MaskRef};
 use moebius_cpu::pipeline::{Control, Progress};
 use moebius_cpu::scheduler::Spacing;
+use moebius_cpu::preset::Solver;
 use moebius_cpu::{Engine, InpaintParams, Preset};
 use serde_json::{Value, json};
 
@@ -35,6 +36,13 @@ enum PresetArg {
 enum SpacingArg {
     Leading,
     Trailing,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SolverArg {
+    Ddim,
+    Dpm,
+    DpmContinuous,
 }
 
 /// `--cfg-steps N` or `--cfg-steps none` (guidance on every step).
@@ -73,10 +81,14 @@ struct Args {
     cfg_steps: Option<CfgSteps>,
     #[arg(long, value_enum)]
     spacing: Option<SpacingArg>,
+    #[arg(long, value_enum)]
+    solver: Option<SolverArg>,
     #[arg(long)]
     strength: Option<f64>,
     #[arg(long)]
     single_encode: Option<bool>,
+    #[arg(long)]
+    roi_encode: Option<bool>,
     #[arg(long)]
     roi_decode: Option<bool>,
     /// Only the first N pairs of each subset (smoke tests, dev sweeps).
@@ -100,10 +112,12 @@ fn config_json(args: &Args, p: &InpaintParams) -> Value {
         "steps": p.steps,
         "strength": p.strength,
         "spacing": format!("{:?}", p.spacing).to_lowercase(),
+        "solver": format!("{:?}", p.solver),
         "guidance": p.guidance,
         "noise_offset": p.noise_offset,
         "cfg_steps": p.cfg_steps,
         "single_encode": p.single_encode,
+        "roi_encode": p.roi_encode,
         "roi_decode": p.roi_decode,
         "paste": format!("{:?}", p.paste),
         "mask_dilate": p.mask_dilate,
@@ -129,8 +143,18 @@ fn main() -> Result<(), BoxErr> {
             SpacingArg::Trailing => Spacing::Trailing,
         };
     }
+    if let Some(v) = args.solver {
+        base.solver = match v {
+            SolverArg::Ddim => Solver::Ddim,
+            SolverArg::Dpm => Solver::DpmPp2M,
+            SolverArg::DpmContinuous => Solver::DpmPp2MContinuous,
+        };
+    }
     if let Some(v) = args.strength {
         base.strength = v;
+    }
+    if let Some(v) = args.roi_encode {
+        base.roi_encode = v;
     }
     if let Some(v) = args.single_encode {
         base.single_encode = v;

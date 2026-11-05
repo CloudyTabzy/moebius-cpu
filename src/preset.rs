@@ -20,11 +20,22 @@ pub enum Paste {
     FeatherCompensate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Solver {
+    /// Upstream's sampler.
+    Ddim,
+    /// DPM-Solver++(2M), restarting its history where guidance switches off.
+    DpmPp2M,
+    /// DPM-Solver++(2M) keeping its history across that switch.
+    DpmPp2MContinuous,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InpaintParams {
     pub steps: usize,
     pub strength: f64,
     pub spacing: Spacing,
+    pub solver: Solver,
     pub guidance: f32,
     pub noise_offset: f32,
     pub seed: u64,
@@ -34,6 +45,9 @@ pub struct InpaintParams {
     /// Encode only the masked image and reuse its latents for the initial
     /// `add_noise` (saves one of the two VAE encodes).
     pub single_encode: bool,
+    /// Encode the original image only around the mask: `z_img` is `z_masked` with the
+    /// mask's neighbourhood replaced. Ignored with `single_encode`.
+    pub roi_encode: bool,
     /// Decode only the latent window around the mask (+ margin).
     pub roi_decode: bool,
     pub paste: Paste,
@@ -48,11 +62,13 @@ impl Preset {
                 steps: 20,
                 strength: 0.99,
                 spacing: Spacing::Leading,
+                solver: Solver::Ddim,
                 guidance: 2.5,
                 noise_offset: 0.0357,
                 seed: 0,
                 cfg_steps: None,
                 single_encode: false,
+                roi_encode: false,
                 roi_decode: false,
                 paste: Paste::Feather,
                 mask_dilate: 0,

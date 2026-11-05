@@ -5,14 +5,15 @@
 //!  2  window → 512² RGB [-1,1] + binary mask (Lanczos)      imaging::resize
 //!  3  masked = rgb · (1 − mask)
 //!  4  z_img, z_masked = VAE.encode([rgb, masked]) · 0.13025 vae::encoder
-//!       (Fast/single_encode: z_img := z_masked)
+//!       (single_encode: z_img := z_masked; roi_encode: only the
+//!       image around the mask is encoded, pasted over z_masked)
 //!  5  mask_lat = nearest(mask → 64²)
 //!  6  noise = N(0,1) + noise_offset · N(0,1)[per channel]   seeded
 //!  7  x = noise if strength ≥ 1 else add_noise(z_img, noise, t₀)
 //!  8  for t in timesteps:                                   scheduler
 //!        ε = UNet([x ‖ mask_lat ‖ z_masked], t)             unet (B=2 / B=1)
 //!        ε = ε_u + g·(ε_c − ε_u)                            (CFG steps)
-//!        x = DDIM.step(ε, t, x)
+//!        x = solver.step(ε, t, x)                           DDIM / DPM++(2M)
 //!        progress(); bail out if cancelled
 //!  9  rgb = VAE.decode(x / 0.13025)  (Fast: ROI window)     vae::decoder
 //!       ROI: decode latents[bbox(mask_lat) ± 8], rest = input image
@@ -33,8 +34,8 @@ use crate::imaging::blend::paste;
 use crate::imaging::crop::CropPlan;
 use crate::imaging::resize::{from_model, to_model};
 use crate::imaging::{ImageMut, MaskRef, Rect, dilate};
-use crate::preset::InpaintParams;
-use crate::scheduler::Ddim;
+use crate::preset::{InpaintParams, Solver};
+use crate::scheduler::{Ddim, Dpm2M};
 use crate::unet::{Guidance, UNet};
 use crate::vae::{LatentRect, ROI_MARGIN, Vae, roi_window};
 use crate::weights::Weights;
@@ -241,13 +242,42 @@ impl Engine {
             })
             .collect();
 
+        // 5: nearest downsample of the mask (torch `interpolate` picks pixel (8y, 8x)).
+        let mask_lat: Vec<f32> = (0..lat)
+            .map(|i| {
+                let (y, x) = (i / LATENT_SIZE, i % LATENT_SIZE);
+                if bin[(y * VAE_DOWNSAMPLE) * IMAGE_SIZE + x * VAE_DOWNSAMPLE] >= 128 { 1.0 } else { 0.0 }
+            })
+            .collect();
+
         // 4: VAE-encode [image, masked] as one batch (posterior sampled with the given noise).
+        let window = roi_window(&mask_lat, ROI_MARGIN).filter(|r| r.w < LATENT_SIZE || r.h < LATENT_SIZE);
         let (z_img, z_masked) = if params.single_encode {
             let masked = Tensor::from_vec(masked, 1, IMAGE_SIZE, IMAGE_SIZE, 3);
             let z = self.pool.install(|| self.vae.encode(&masked, &noise.vae_masked, &mut scratch));
             let v = z.data.to_vec();
             scratch.recycle(z);
             (v.clone(), v)
+        } else if let (true, Some(r)) = (params.roi_encode, window) {
+            let masked = Tensor::from_vec(masked, 1, IMAGE_SIZE, IMAGE_SIZE, 3);
+            let z = self.pool.install(|| self.vae.encode(&masked, &noise.vae_masked, &mut scratch));
+            let z_masked = z.data.to_vec();
+            scratch.recycle(z);
+            let (px, c) = (VAE_DOWNSAMPLE, LATENT_CHANNELS);
+            let crop = crop_rows(&rgb, IMAGE_SIZE, 3, r.x * px, r.y * px, r.w * px, r.h * px);
+            let crop = Tensor::from_vec(crop, 1, r.h * px, r.w * px, 3);
+            let crop_noise = crop_rows(&noise.vae_img.data, LATENT_SIZE, c, r.x, r.y, r.w, r.h);
+            let crop_noise = Tensor::from_vec(crop_noise, 1, r.h, r.w, c);
+            let part = self.pool.install(|| self.vae.encode(&crop, &crop_noise, &mut scratch));
+            // The window's border latents see zero padding: keep only the part nearer the mask.
+            let inner = roi_window(&mask_lat, ROI_MARGIN / 2).expect("the outer window exists");
+            let mut z_img = z_masked.clone();
+            for y in inner.y..inner.y + inner.h {
+                let src = ((y - r.y) * r.w + inner.x - r.x) * c;
+                z_img[(y * LATENT_SIZE + inner.x) * c..][..inner.w * c].copy_from_slice(&part.data[src..][..inner.w * c]);
+            }
+            scratch.recycle(part);
+            (z_img, z_masked)
         } else {
             let images = Tensor::from_vec([rgb.as_slice(), masked.as_slice()].concat(), 2, IMAGE_SIZE, IMAGE_SIZE, 3);
             let noises = Tensor::from_vec(
@@ -266,14 +296,6 @@ impl Engine {
         // keep them resident through the whole denoising loop.
         scratch.release_below(usize::MAX);
         report(Stage::Encode, 1, 1)?;
-
-        // 5: nearest downsample of the mask (torch `interpolate` picks pixel (8y, 8x)).
-        let mask_lat: Vec<f32> = (0..lat)
-            .map(|i| {
-                let (y, x) = (i / LATENT_SIZE, i % LATENT_SIZE);
-                if bin[(y * VAE_DOWNSAMPLE) * IMAGE_SIZE + x * VAE_DOWNSAMPLE] >= 128 { 1.0 } else { 0.0 }
-            })
-            .collect();
 
         // 6: init = N(0,1) + noise_offset · N(0,1)[per channel].
         let init: Vec<f32> = noise
@@ -296,6 +318,7 @@ impl Engine {
         // 8: denoise. UNet input per pixel = [x(4) ‖ mask(1) ‖ masked latent(4)].
         let mut input = Tensor::zeros(1, LATENT_SIZE, LATENT_SIZE, UNET_IN_CHANNELS);
         let mut eps = vec![0.0f32; x.len()];
+        let mut dpm = Dpm2M::default();
         for (i, &t) in steps.iter().enumerate() {
             for (p, o) in input.data.chunks_exact_mut(UNET_IN_CHANNELS).enumerate() {
                 o[..4].copy_from_slice(&x[p * 4..p * 4 + 4]);
@@ -314,7 +337,15 @@ impl Engine {
                 eps.copy_from_slice(e.item(0));
                 scratch.recycle(e);
             }
-            ddim.step(&eps, t, &mut x);
+            match params.solver {
+                Solver::Ddim => ddim.step(&eps, t, &mut x),
+                Solver::DpmPp2M | Solver::DpmPp2MContinuous => {
+                    if params.solver == Solver::DpmPp2M && params.cfg_steps == Some(i) {
+                        dpm.restart();
+                    }
+                    dpm.step(&ddim, &eps, i, &mut x);
+                }
+            }
             report(Stage::Denoise, i + 1, steps.len())?;
         }
         if let Some(out) = latents_out {
@@ -345,6 +376,11 @@ impl Engine {
         scratch.recycle(decoded);
         Ok(result)
     }
+}
+
+/// The `w x h` window at (`x`, `y`) of a row-major image `stride` pixels wide, `c` channels.
+fn crop_rows(data: &[f32], stride: usize, c: usize, x: usize, y: usize, w: usize, h: usize) -> Vec<f32> {
+    (y..y + h).flat_map(|row| &data[(row * stride + x) * c..][..w * c]).copied().collect()
 }
 
 /// 512² model-space frame `(x + 1) / 2` of the input image `rgb` (NHWC, [-1, 1]) with the
@@ -378,6 +414,12 @@ mod tests {
         for (x, y) in [(15, 24), (48, 24), (16, 23), (16, 64), (0, 0), (511, 511)] {
             assert_eq!(frame[at(x, y)], (rgb[at(x, y)] + 1.0) * 0.5, "({x}, {y})");
         }
+    }
+
+    #[test]
+    fn crop_rows_takes_the_window() {
+        let data: Vec<f32> = (0..4 * 3 * 2).map(|i| i as f32).collect(); // 4 wide, 3 high, 2 channels
+        assert_eq!(crop_rows(&data, 4, 2, 1, 1, 2, 2), [10.0, 11.0, 12.0, 13.0, 18.0, 19.0, 20.0, 21.0]);
     }
 
     #[test]
