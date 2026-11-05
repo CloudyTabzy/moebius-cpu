@@ -174,6 +174,9 @@ fn rebuild_tensor(args: &[Value]) -> Res<Value> {
         return Err("unexpected tensor record".into());
     };
     let (shape, stride) = (ints(size)?, ints(stride)?);
+    if shape.len() != stride.len() {
+        return Err("tensor record with mismatched size and stride".into());
+    }
     let mut expected = 1;
     for (&dim, &step) in shape.iter().zip(&stride).rev() {
         if dim > 1 && step != expected {
@@ -554,7 +557,10 @@ fn write(tensors: &BTreeMap<String, Output>, metadata: HashMap<String, String>, 
         .collect::<Res<Vec<_>>>()?;
     // A partial file must not look like a finished model to the next install.
     let partial = path.with_extension("partial");
-    safetensors::serialize_to_file(views, Some(metadata), &partial).map_err(|e| format!("{}: {e}", partial.display()))?;
+    if let Err(e) = safetensors::serialize_to_file(views, Some(metadata), &partial) {
+        let _ = fs::remove_file(&partial);
+        return Err(format!("{}: {e}", partial.display()));
+    }
     fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))?;
     println!("wrote {} ({} tensors)", path.display(), tensors.len());
     Ok(())
@@ -649,6 +655,16 @@ mod tests {
         assert_eq!(tensors.len(), 1);
         assert_eq!(tensors[0].0, "a");
         assert_eq!(tensors[0].1, Tensor { kind: Kind::F32, key: "0".into(), shape: vec![2] });
+    }
+
+    #[test]
+    fn tensor_records_need_one_stride_per_dimension() {
+        let int_tuple = |values: &[i64]| Value::Tuple(Rc::new(values.iter().map(|&v| Value::Int(v)).collect()));
+        let record = |stride: &[i64]| {
+            [Value::Storage(Kind::F32, "0".into()), Value::Int(0), int_tuple(&[2, 3]), int_tuple(stride)]
+        };
+        assert!(rebuild_tensor(&record(&[3, 1])).is_ok());
+        assert!(rebuild_tensor(&record(&[1])).unwrap_err().contains("mismatched"));
     }
 
     #[test]
