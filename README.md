@@ -8,13 +8,12 @@ The design, measurements and speed promise are in **[docs/PLAN.md](docs/PLAN.md)
 
 ## Status
 
-Milestones M0–M8 are done: **Moebius runs end to end in pure Rust and matches PyTorch.**
+Milestones M0–M9 are done: **Moebius runs in GIMP on pure Rust and matches PyTorch.**
 Given the same noise, the 8-bit output reaches 74.6–78.6 dB PSNR vs upstream with f32 weights
 and 49.6–61.9 dB with f16 (8 test pairs). Every block is checked against recorded PyTorch
 tensors (`tests/parity.rs`).
 
-Still to do:
-- M9: hook up the GIMP plugin through the C ABI.
+Still to do: try the plugin's dialog and cancel button by hand, and test on a second machine.
 
 ## Targets (i7-13620H, 512² window)
 
@@ -25,6 +24,30 @@ Still to do:
 
 Peak working set 1.42–1.44 GB (≤ 1.5 GB). Engine load ~0.35 s. Requires x86-64 with AVX2 + FMA.
 Pure Rust: dense math on `private-gemm-x86` (multi-threaded) and `gemm` (Winograd tiles).
+
+Inside GIMP add about 2 s: the plugin loads the model and moves PNGs on every run (Fast 13–14 s,
+Exact 27 s).
+
+## Use it in GIMP
+
+Needs GIMP 3.2 on Windows and the converted `ft_places2` and `ft_celebahq` checkpoints in `weights/`.
+
+```bat
+gimp-plugin\install.bat
+```
+
+Restart GIMP, select what to remove, then use **Filters > Enhance > Moebius Inpaint...**
+
+- **Cover the whole object with a margin**, shadows included. Anything left outside the selection
+  can grow back. Grow a tight selection by 10 px or so.
+- Pick **Faces** for portraits and **Scenes and objects** for everything else.
+- Change **Seed** for a different result.
+- Only the selection changes, and alpha is kept. The result inside the selection is 8-bit, even in
+  a higher-precision image.
+
+GIMP's Python cannot load MSVC binaries, so the plugin runs `moebius-cli.exe` as a separate process.
+`include/moebius_cpu.h` remains for native hosts. `tools/gimp_smoke.py` tests an installed plugin
+headlessly.
 
 ## Run it
 

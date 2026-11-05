@@ -14,6 +14,14 @@ Rules for anyone (human or agent) working in this repo. Design and measurements 
 - Exact preset results must not change: `cargo test --release --test parity -- --ignored --test-threads=1`.
 - Do not move a gate to pass it. Report the number, and let the user decide.
 
+## GIMP plugin
+
+- GIMP's Python is MINGW and cannot load MSVC binaries: keep inference in `moebius-cli.exe`. Import
+  only GIMP's own modules in `gimp-plugin/moebius-inpaint.py`.
+- `moebius-cli --plugin` exits when stdin closes, so a killed plugin leaves no process holding the exe.
+- Judge removals with selections that cover the whole object. A selection that cuts through an
+  object leaves part of it behind, and Exact does the same.
+
 ## Running benchmarks
 
 - Long runs must be detached with output in `weights/logs/`. Session restarts kill attached shells.

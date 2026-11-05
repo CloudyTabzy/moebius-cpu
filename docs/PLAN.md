@@ -1,6 +1,6 @@
 # moebius-cpu: Design and Results
 
-*Status: M0–M8 complete: Exact matches PyTorch and Fast passed its gates (§5) · Date: 2026-11-05*
+*Status: M0–M9 complete except the GIMP dialog check (§10): Exact matches PyTorch, Fast passed its gates (§5) · Date: 2026-11-05*
 
 ## 1. Goal
 
@@ -316,7 +316,7 @@ actually depends on: all depthwise convs of a UNet step ≈ 45 ms.
 | **M6** ✅ | VAE encoder / decoder | Parity; encode 2.8–3.2 s (B=2), decode 2.7–3.1 s |
 | **M7** ✅ | Pipeline, resize, blend (Pillow-exact), CLI | Exact e2e gate (§9); 24–25 s cool; 1.42 GB peak |
 | **M8** ✅ | Fast preset tuning, eval tooling, DPM-Solver++(2M), compensated paste | Fast gates (§9); 10.7–11.9 s cool; ROI decode rejected |
-| M9 | Plugin hookup, packaging, cancel/progress UX | GIMP smoke test on benchmark CPU |
+| **M9** | `gimp-plugin/`: Python glue, `moebius-cli --plugin` worker, per-user installer, progress, orphan-safe cancel | Headless run inside GIMP 3.2.6 ✅: Fast 13–14 s, Exact 27 s including load and PNG transfer; 0 pixels changed outside the selection; alpha untouched. Not yet exercised: the interactive dialog and the cancel button |
 
 ## 11. Risks
 
