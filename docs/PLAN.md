@@ -237,9 +237,12 @@ Pipeline steps are in `src/pipeline.rs`. The **crop policy** (`src/imaging/crop.
   the selection.
 - The worker prints `PROGRESS <stage> <done> <total>` for GIMP's progress bar. It exits with code 3
   when stdin closes, so a killed plugin leaves no process behind.
-- `install.bat` puts the plugin, the worker and both models into the user's GIMP profile. It downloads
+- Releases hold only the compiled programs and scripts: `.github/workflows/release.yml` builds the zip
+  for a `v*` tag.
+- `install.py` puts the plugin, the worker and both models into the user's GIMP profile. It downloads
   from pinned Hugging Face revisions, so nothing large is hosted here, and resumes after a dropped
-  connection. `.github/workflows/release.yml` builds the zip for a `v*` tag.
+  connection. It uses only the standard library, so GIMP's bundled Python runs it: `install.bat` finds
+  that Python.
 
 **C ABI** (`include/moebius_cpu.h`, `src/ffi.rs`, implemented and tested). It serves native hosts;
 the GIMP plugin does not use it:

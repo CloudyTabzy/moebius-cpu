@@ -38,9 +38,10 @@ Hardware, method and full results: [docs/PLAN.md](docs/PLAN.md#4-measured-comput
 2. Download [moebius-inpaint-gimp-windows.zip](https://github.com/CloudyTabzy/moebius-cpu/releases/latest/download/moebius-inpaint-gimp-windows.zip) and unzip it.
 3. Double-click `install.bat`.
 
-It downloads about 2 GB of models from Hugging Face, checks them and sets everything up for your user,
-with no admin rights, Python or GPU needed. It needs about 3 GB of free disk while running and 1.3 GB
-afterwards. On a slow connection this can take an hour. It resumes by itself if the connection drops,
+The zip holds the compiled programs. `install.bat` runs `install.py` with the Python that comes with
+GIMP, so there is nothing else to install and no admin rights are needed. The script downloads about
+2 GB of models from Hugging Face, checks them and puts them in GIMP's plug-ins folder. It needs about
+3 GB of free disk while running and 1.3 GB afterwards. On a slow connection this can take an hour. It resumes by itself if the connection drops,
 and if you close it, running it again carries on.
 
 The programs are not code-signed yet, so Windows may warn you. Choose **More info**, then **Run anyway**.
@@ -107,6 +108,7 @@ cargo test --release --test parity -- --ignored        # per-block parity vs PyT
 | `tools/eval/prepare_eval_set.py`, `score.py` | Build the 120-pair eval set and score runs with LPIPS |
 | `tools/eval/roi_gate.py`, `review_sheet.py` | ROI decode gate and the visual review sheet |
 | `tools/gimp_smoke.py` | Headless test of the installed plugin inside real GIMP |
+| `tools/tests/test_install.py` | Installer downloads against a local server that drops connections |
 
 ## Layout
 

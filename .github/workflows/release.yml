@@ -1,5 +1,5 @@
 # Pushing a tag like v0.1.0 builds the Windows package and attaches it to a GitHub release.
-# The zip is a few MB: the models are downloaded by install.bat, never hosted here.
+# The zip holds the compiled programs, a few MB. install.py downloads the models, never hosted here.
 name: Release
 
 on:
@@ -25,7 +25,7 @@ jobs:
         run: |
           $dir = "moebius-inpaint-gimp-windows"
           New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item gimp-plugin/install.bat, gimp-plugin/moebius-inpaint.py, LICENSE $dir
+          Copy-Item gimp-plugin/install.bat, gimp-plugin/install.py, gimp-plugin/moebius-inpaint.py, LICENSE $dir
           Copy-Item target/release/moebius-cli.exe, target/release/moebius-convert.exe $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
       - uses: actions/upload-artifact@v4

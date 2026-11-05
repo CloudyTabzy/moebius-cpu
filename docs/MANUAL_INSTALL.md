@@ -1,6 +1,6 @@
 # Manual install
 
-These steps do by hand what `install.bat` does. You need GIMP 3.2 on Windows, opened at least once,
+These steps do by hand what `install.py` does. You need GIMP 3.2 on Windows, opened at least once,
 and about 3 GB of free disk.
 
 ## 1. Get the programs
